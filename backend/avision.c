@@ -702,7 +702,7 @@ static Avision_HWEntry Avision_Device_List [] =
     { NULL, NULL,
       0x0638, 0x2a1e,
       "iVina", "FB6280E",
-      AV_NON_INTERLACED_DUPLEX_300,
+      AV_NON_INTERLACED_DUPLEX_300 | AV_NVRAM_SIDE_EDGE,
       { 0, {0, 0}, {{0, 0}, {0, 0}} }
     },
     /* comment="1 pass, 600 dpi, A3, zero edge" */
@@ -3595,7 +3595,7 @@ get_flash_ram_info (Avision_Connection* av_con)
 }
 
 static SANE_Status
-get_nvram_data (Avision_Scanner* s, nvram_data* nvram)
+get_nvram_data (Avision_Connection* av_con, nvram_data* nvram)
 {
   /* read stuff */
   struct command_send rcmd;
@@ -3616,7 +3616,7 @@ get_nvram_data (Avision_Scanner* s, nvram_data* nvram)
   set_double (rcmd.datatypequal, 0); /* dev->data_dq not available */
   set_triple (rcmd.transferlen, size);
 
-  status = avision_cmd (&s->av_con, &rcmd, sizeof (rcmd), 0, 0,
+  status = avision_cmd (av_con, &rcmd, sizeof (rcmd), 0, 0,
 			nvram, &size);
   if (status != SANE_STATUS_GOOD) {
     DBG (1, "get_nvram_data: read failed (%s)\n",
@@ -3651,7 +3651,7 @@ get_and_parse_nvram (Avision_Scanner* s, char* str, size_t n)
   if (!s->hw->inquiry_nvram_read)
     return SANE_STATUS_GOOD;
 
-  status = get_nvram_data (s, &nvram);
+  status = get_nvram_data (&s->av_con, &nvram);
   if (status == SANE_STATUS_GOOD)
     {
       if (nvram.serial[0])
@@ -3697,7 +3697,7 @@ get_power_save_time (Avision_Scanner* s, SANE_Word* time)
   if (!s->hw->inquiry_nvram_read)
     return SANE_STATUS_INVAL;
 
-  status = get_nvram_data (s, &nvram);
+  status = get_nvram_data (&s->av_con, &nvram);
 
   if (status != SANE_STATUS_GOOD) {
     DBG (1, "get_power_save_time: read nvram failed (%s)\n", sane_strstatus (status));
@@ -5071,6 +5071,29 @@ get_double ( &(result[48] ) ));
 		dev->inquiry_y_ranges [mode] = A4_Y_RANGE * MM_PER_INCH;
 	    }
 	  }
+	/* the firmware leaves the NVRAM side edge out of the width */
+	if (mode == AV_NORMAL_DIM && dev->inquiry_nvram_read &&
+	    (dev->hw->feature_type & AV_NVRAM_SIDE_EDGE) &&
+	    !force_a4 && !force_a3)
+	  {
+	    nvram_data nvram;
+
+	    if (get_nvram_data (&av_con, &nvram) == SANE_STATUS_GOOD)
+	      {
+		int16_t side = (int16_t) get_double (nvram.flatbed_side_edge);
+		double extra = (double)(-side) * MM_PER_INCH / 150.0;
+
+		if (side < 0 && extra < 10.0)
+		  {
+		    dev->inquiry_x_ranges [mode] += extra;
+		    DBG (1, "attach: NVRAM side edge %d, adding %f mm\n",
+			 side, extra);
+		  }
+		else
+		  DBG (1, "attach: NVRAM side edge %d ignored\n", side);
+	      }
+	  }
+
 	DBG (1, "attach: Mode %d range is now: %f x %f mm.\n",
 	     mode,
 	     dev->inquiry_x_ranges [mode], dev->inquiry_y_ranges [mode]);

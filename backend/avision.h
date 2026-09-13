@@ -326,6 +326,9 @@ typedef struct Avision_HWEntry {
      out of ordinary idle reports. (HP ScanJet Pro 3000 s2.) */
   #define AV_NO_BUTTON_SYNTH ((uint64_t)1<<49)
 
+  /* add the NVRAM flatbed side edge to the scan width (iVina FB6280E) */
+  #define AV_NVRAM_SIDE_EDGE ((uint64_t)1<<50)
+
     /* maybe more ...*/
   uint64_t feature_type;
 
