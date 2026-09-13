@@ -1,0 +1,1 @@
+avision: Honor "option skip-adf" when building the list of scan sources, so that a scanner incorrectly reporting an ADF no longer advertises one.
