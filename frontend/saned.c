@@ -283,7 +283,7 @@ static int allow_network;
 static int data_connect_timeout = 4000;
 static Handle *handle;
 static char *bind_addr;
-static short bind_port = -1;
+static int bind_port = -1;
 static size_t buffer_size = (1 * 1024 * 1024);
 static union
 {
@@ -2913,7 +2913,7 @@ static void
 do_bindings_family (int family, struct addrinfo *res)
 {
   struct addrinfo *resp;
-  short sane_port;
+  int sane_port;
   int fd = -1;
   int on = 1;
   int i;
@@ -3068,7 +3068,7 @@ do_bindings (void)
 {
   struct sockaddr_in sin;
   struct servent *serv;
-  short port;
+  int port;
   int fd = -1;
   int on = 1;
 
