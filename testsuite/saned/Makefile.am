@@ -6,7 +6,7 @@
 
 SANED     = ../../frontend/saned$(EXEEXT)
 SCANIMAGE = ../../frontend/scanimage$(EXEEXT)
-DEVICE    = net:localhost:test
+DEVICE    = net:localhost:port:test
 
 EXTRA_DIST = README saned.sh
 

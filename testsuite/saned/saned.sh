@@ -48,24 +48,21 @@ if test ! -f ../../backend/libsane-test.la; then
 fi
 
 printf 'net\ntest\n' > "$SANE_CONFIG_DIR/dll.conf"
-printf 'localhost\n' > "$SANE_CONFIG_DIR/net.conf"
 printf 'resolution 50.0\n' > "$SANE_CONFIG_DIR/test.conf"
 printf '' > "$SANE_CONFIG_DIR/saned.conf"
 
-"$SANED" -l -o -d 128 -e -b 127.0.0.1 > "$SANED_LOG" 2>&1 &
+"$SANED" -l -o -d 128 -e -b 127.0.0.1 -p 0 > "$SANED_LOG" 2>&1 &
 SANED_PID=$!
 
-# Poll the log for readiness
+# Poll the log for readiness and the assigned port
+SANED_PORT=
 i=0
-until grep -q "run_standalone: waiting for control connection" "$SANED_LOG" 2>/dev/null; do
+until test -n "$SANED_PORT"; do
+    SANED_PORT=$(sed -n 's/.*selected ephemeral port: \([0-9][0-9]*\)$/\1/p' "$SANED_LOG" 2>/dev/null | tail -n 1)
     i=$((i + 1))
     if test "$i" -gt "$READY_TIMEOUT"; then
         TEST_FAILED=1
-        if grep -q "bind failed" "$SANED_LOG" 2>/dev/null; then
-            echo "saned test: port 6566 is already in use" >&2
-        else
-            echo "saned test: saned not listening after $READY_TIMEOUT seconds" >&2
-        fi
+        echo "saned test: saned not listening or no 'selected ephemeral port' line in saned log after $READY_TIMEOUT seconds" >&2
         exit 1
     fi
     sleep 1
@@ -73,14 +70,16 @@ done
 
 # Test whether a second saned on the same port exits cleanly.
 status=0
-timeout "$READY_TIMEOUT" "$SANED" -l -o -d 128 -e -b 127.0.0.1 >/dev/null 2>&1 || status=$?
+timeout "$READY_TIMEOUT" "$SANED" -l -o -d 128 -e -b 127.0.0.1 -p "$SANED_PORT" >/dev/null 2>&1 || status=$?
 if test "$status" -ne 1; then
     echo "saned test: second saned on a busy port exited with status $status, expected 1" >&2
     exit 1
 fi
 
+printf 'localhost:%s\n' "$SANED_PORT" > "$SANE_CONFIG_DIR/net.conf"
+
 # Full scanimage test.
-if timeout "$TEST_TIMEOUT" "$SCANIMAGE" -d net:localhost:test -T; then
+if timeout "$TEST_TIMEOUT" "$SCANIMAGE" -d "net:localhost:$SANED_PORT:test" -T; then
     :
 else
     status=$?
