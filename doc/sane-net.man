@@ -25,14 +25,23 @@ is the name (or IP address) of the (remote) host and
 is the name of the device on this host that should be addressed.
 If the device name does not contain a colon (:), then the entire string
 is treated as the
-.I device
-string for the default host.  The default host is the host listed last
-in the configuration file (see below).
+.I host
+name and the first device found on that host is opened.
 .PP
-An IPv6 address can be specified enclosed in square brackets:
+An optional port number can be specified between
+.I host
+and
+.IR device ,
+in the form
+.IR host : port : device .
+If no port is specified, the
+.B sane\-port
+service is used, falling back to the default port 6566 if that
+service is not defined.  An IPv6 address can be specified enclosed in
+square brackets:
 .PP
 .RS
-.IR [::1] : device
+.IR [::1] : port : device
 .RE
 .SH CONFIGURATION
 The
@@ -40,6 +49,15 @@ The
 file contains both backend options and a list of host names (or IP
 addresses) that should be contacted for scan requests. Anything that
 isn't one of the options listed below will be treated as an host name.
+An optional port number can be appended to a host name or IP address,
+separated by a colon, in the form
+.IR host : port
+or
+.IR [host] : port
+for IPv6 addresses.  If no port is specified, the
+.B sane\-port
+service is used, falling back to the default port 6566 if that
+service is not defined.
 .PP
 .TP
 .B connect_timeout = nsecs
@@ -54,7 +72,8 @@ can also be used to specify the timeout at runtime.
 .PP
 Empty lines and lines starting with a hash mark (#) are
 ignored.  Note that IPv6 addresses in this file do not need to be enclosed
-in square brackets.  A sample configuration file is shown below:
+in square brackets, unless a port is specified.  A sample configuration
+file is shown below:
 .PP
 .RS
 scan\-server.somedomain.firm
@@ -66,6 +85,10 @@ scan\-server.somedomain.firm
 localhost
 .br
 ::1
+.br
+scan\-server.somedomain.firm:6580
+.br
+[::1]:6580
 .RE
 .PP
 The above list of hosts can be extended at run-time using environment
@@ -73,7 +96,12 @@ variable
 .BR SANE_NET_HOSTS .
 This environment variable is a colon-separated list of hostnames or IP
 addresses that should be contacted in addition to the hosts mentioned in
-the configuration file.  For example, a user could set the environment
+the configuration file.  Each host may be followed by an optional port
+number in the form
+.IR host : port
+or
+.IR [host] : port
+for IPv6 addresses.  For example, a user could set the environment
 variable to the string:
 .PP
 .RS
@@ -137,7 +165,11 @@ being searched (in this order).
 .TP
 .B SANE_NET_HOSTS
 A colon-separated list of host names or IP addresses to be contacted by this
-backend.
+backend.  Each host may be followed by an optional port number, as in
+.IR host : port
+or
+.IR [host] : port
+for IPv6 addresses.
 .TP
 .B SANE_NET_TIMEOUT
 Number of seconds to wait for a response from the

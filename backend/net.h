@@ -51,6 +51,7 @@ typedef struct Net_Device
   {
     struct Net_Device *next;
     const char *name;
+    int port;			/* TCP port to connect to */
 #if defined (HAVE_GETADDRINFO) && defined (HAVE_GETNAMEINFO)
     struct addrinfo *addr;
     struct addrinfo *addr_used;
