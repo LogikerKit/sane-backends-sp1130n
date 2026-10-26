@@ -64,6 +64,7 @@
 #include <sys/types.h>
 
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h> /* OS/2 needs this _after_ <netinet/in.h>, grrr... */
 
 #if WITH_AVAHI
@@ -121,10 +122,7 @@ static int client_big_endian; /* 1 == big endian; 0 == little endian */
 static int server_big_endian; /* 1 == big endian; 0 == little endian */
 static int depth; /* bits per pixel */
 static int connect_timeout = -1; /* timeout for connection to saned */
-
-#ifndef NET_USES_AF_INDEP
-static int saned_port;
-#endif /* !NET_USES_AF_INDEP */
+static int default_port = 6566; /* default saned port */
 
 /* This variable is only needed, if the depth is 16bit/channel and
    client/server have different endianness.  A value of -1 means, that there's
@@ -144,28 +142,116 @@ static int hang_over;
 */
 static int left_over;
 
+static int
+parse_port (const char *port_str)
+{
+  char *end;
+  long port;
+
+  if (!port_str || !*port_str)
+    return -1;
+
+  errno = 0;
+  port = strtol (port_str, &end, 10);
+  if (errno || end == port_str || *end != '\0' || port < 1 || port > 65535)
+    return -1;
+
+  return port;
+}
+
+static char *
+split_port (char *str, char **next)
+{
+  size_t len = strspn (str, "0123456789");
+
+  if (len == 0 || (str[len] != '\0' && str[len] != ':'))
+    return NULL;
+
+  *next = str + len;
+  if (**next == ':')
+    (*next)++;
+  str[len] = '\0';
+  return str;
+}
+
+static int
+parse_host_port (char *entry, char **host, char **next)
+{
+  char *rest, *end, *port_str = NULL;
+#ifdef ENABLE_IPV6
+  struct in6_addr addr;
+#endif /* ENABLE_IPV6 */
+
+  *next = entry + strlen (entry);
+
+  if (entry[0] == '[')
+    {
+      *host = entry + 1;
+      rest = strchr (*host, ']');
+      if (!rest)
+	{
+	  end = entry + 1;
+	  while (*end == ':')
+	    end++;
+	  end = strchr (end, ':');
+	  *next = end ? end + 1 : entry + strlen (entry);
+	  return -1;
+	}
+
+      *rest++ = '\0';
+      if (*rest == ':')
+	{
+	  rest++;
+	  port_str = split_port (rest, next);
+	}
+      else if (*rest)
+	{
+	  *next = rest;
+	  return -1;
+	}
+
+      if (!port_str)
+	*next = rest;
+    }
+#ifdef ENABLE_IPV6
+  else if (inet_pton (AF_INET6, entry, &addr) == 1)
+    *host = entry;
+#endif /* ENABLE_IPV6 */
+  else
+    {
+      *host = entry;
+      rest = strchr (entry, ':');
+      if (rest)
+	{
+	  *rest = '\0';
+	  port_str = split_port (rest + 1, next);
+	  if (!port_str)
+	    *next = rest + 1;
+	}
+    }
+
+  if (!**host)
+    return -1;
+
+  return port_str ? parse_port (port_str) : default_port;
+}
 
 #ifdef NET_USES_AF_INDEP
 static SANE_Status
-add_device (const char *name, Net_Device ** ndp)
+add_device (const char *name, int port, Net_Device ** ndp)
 {
   struct addrinfo hints;
   struct addrinfo *res;
-  struct addrinfo *resp;
-  struct sockaddr_in *sin;
-#ifdef ENABLE_IPV6
-  struct sockaddr_in6 *sin6;
-#endif /* ENABLE_IPV6 */
 
   Net_Device *nd = NULL;
 
   int error;
-  short sane_port = htons (6566);
+  char service[16];
 
-  DBG (1, "add_device: adding backend %s\n", name);
+  DBG (1, "add_device: adding backend %s on port %d\n", name, port);
 
   for (nd = first_device; nd; nd = nd->next)
-    if (strcmp (nd->name, name) == 0)
+    if (strcmp (nd->name, name) == 0 && nd->port == port)
       {
 	DBG (1, "add_device: already in list\n");
 
@@ -183,36 +269,14 @@ add_device (const char *name, Net_Device ** ndp)
   hints.ai_family = PF_INET;
 # endif /* ENABLE_IPV6 */
 
-  error = getaddrinfo (name, "sane-port", &hints, &res);
+  snprintf (service, sizeof (service), "%d", port);
+  error = getaddrinfo (name, service, &hints, &res);
   if (error)
     {
-      error = getaddrinfo (name, NULL, &hints, &res);
-      if (error)
-	{
-	  DBG (1, "add_device: error while getting address of host %s: %s\n",
-	       name, gai_strerror (error));
+      DBG (1, "add_device: error while getting address of host %s: %s\n",
+	   name, gai_strerror (error));
 
-	  return SANE_STATUS_IO_ERROR;
-	}
-      else
-	{
-          for (resp = res; resp != NULL; resp = resp->ai_next)
-            {
-              switch (resp->ai_family)
-                {
-                  case AF_INET:
-                    sin = (struct sockaddr_in *) resp->ai_addr;
-                    sin->sin_port = sane_port;
-                    break;
-#ifdef ENABLE_IPV6
-		  case AF_INET6:
-		    sin6 = (struct sockaddr_in6 *) resp->ai_addr;
-		    sin6->sin6_port = sane_port;
-		    break;
-#endif /* ENABLE_IPV6 */
-                }
-	    }
-	}
+      return SANE_STATUS_IO_ERROR;
     }
 
   nd = malloc (sizeof (Net_Device));
@@ -234,6 +298,7 @@ add_device (const char *name, Net_Device ** ndp)
     }
 
   nd->addr = res;
+  nd->port = port;
   nd->ctl = -1;
 
   nd->next = first_device;
@@ -249,7 +314,7 @@ add_device (const char *name, Net_Device ** ndp)
 #else /* !NET_USES_AF_INDEP */
 
 static SANE_Status
-add_device (const char *name, Net_Device ** ndp)
+add_device (const char *name, int port, Net_Device ** ndp)
 {
   struct hostent *he;
   Net_Device *nd;
@@ -258,7 +323,7 @@ add_device (const char *name, Net_Device ** ndp)
   DBG (1, "add_device: adding backend %s\n", name);
 
   for (nd = first_device; nd; nd = nd->next)
-    if (strcmp (nd->name, name) == 0)
+    if (strcmp (nd->name, name) == 0 && nd->port == port)
       {
 	DBG (1, "add_device: already in list\n");
 
@@ -297,6 +362,7 @@ add_device (const char *name, Net_Device ** ndp)
       free (nd);
       return SANE_STATUS_NO_MEM;
     }
+  nd->port = port;
   nd->addr.sa_family = he->h_addrtype;
 
   sin = (struct sockaddr_in *) &nd->addr;
@@ -313,14 +379,14 @@ add_device (const char *name, Net_Device ** ndp)
 #endif /* NET_USES_AF_INDEP */
 
 static SANE_Status
-add_device_locked (const char *name, Net_Device ** ndp)
+add_device_locked (const char *name, int port, Net_Device ** ndp)
 {
   SANE_Status status;
 #if WITH_AVAHI
   if (avahi_thread)
     avahi_threaded_poll_lock (avahi_thread);
 #endif /* WITH_AVAHI */
-  status = add_device (name, ndp);
+  status = add_device (name, port, ndp);
 #if WITH_AVAHI
   if (avahi_thread)
     avahi_threaded_poll_unlock (avahi_thread);
@@ -461,7 +527,7 @@ connect_dev (Net_Device * dev)
       return SANE_STATUS_IO_ERROR;
     }
   sin = (struct sockaddr_in *) &dev->addr;
-  sin->sin_port = saned_port;
+  sin->sin_port = htons (dev->port);
 
 
   /* Set SO_SNDTIMEO for the connection to saned */
@@ -780,12 +846,12 @@ net_avahi_resolve_callback (AvahiServiceResolver *r, AvahiIfIndex interface, Ava
 	/* TODO: evaluate TXT record */
 
 	/* Try first with the name */
-	if (add_device (host_name, NULL) != SANE_STATUS_GOOD)
+	if (add_device (host_name, port, NULL) != SANE_STATUS_GOOD)
 	  {
 	    DBG (1, "net_avahi_resolve_callback: couldn't add backend with name %s\n", host_name);
 
 	    /* Then try the raw IP address */
-	    if (add_device (t, NULL) != SANE_STATUS_GOOD)
+	    if (add_device (t, port, NULL) != SANE_STATUS_GOOD)
 	      DBG (1, "net_avahi_resolve_callback: couldn't add backend with IP address %s either\n", t);
 	  }
 
@@ -987,16 +1053,16 @@ SANE_Status
 sane_init (SANE_Int * version_code, SANE_Auth_Callback authorize)
 {
   char device_name[PATH_MAX];
+  char orig_entry[PATH_MAX];
+  char *host, *next;
+  int port;
   const char *optval;
   const char *env;
   size_t len;
   FILE *fp;
   short ns = 0x1234;
   unsigned char *p = (unsigned char *)(&ns);
-
-#ifndef NET_USES_AF_INDEP
   struct servent *serv;
-#endif /* !NET_USES_AF_INDEP */
 
   DBG_INIT ();
 
@@ -1006,6 +1072,13 @@ sane_init (SANE_Int * version_code, SANE_Auth_Callback authorize)
   devlist = NULL;
   first_device = NULL;
   first_handle = NULL;
+
+  serv = getservbyname ("sane-port", "tcp");
+  if (serv)
+    default_port = ntohs (serv->s_port);
+  else
+    DBG (1, "sane_init: could not find sane-port service (%s);"
+	 " using default port %d\n", strerror (errno), default_port);
 
 #if WITH_AVAHI
   net_avahi_init ();
@@ -1034,23 +1107,6 @@ sane_init (SANE_Int * version_code, SANE_Auth_Callback authorize)
       client_big_endian = 0;
       DBG (3, "sane_init: Client has little endian byte order\n");
     }
-
-#ifndef NET_USES_AF_INDEP
-  DBG (2, "sane_init: determining sane service port\n");
-  serv = getservbyname ("sane-port", "tcp");
-
-  if (serv)
-    {
-      DBG (2, "sane_init: found port %d\n", ntohs (serv->s_port));
-      saned_port = serv->s_port;
-    }
-  else
-    {
-      saned_port = htons (6566);
-      DBG (1, "sane_init: could not find `sane-port' service (%s); using default "
-	   "port %d\n", strerror (errno), ntohs (saned_port));
-    }
-#endif /* !NET_USES_AF_INDEP */
 
   DBG (2, "sane_init: searching for config file\n");
   fp = sanei_config_open (NET_CONFIG_FILE);
@@ -1087,8 +1143,16 @@ sane_init (SANE_Int * version_code, SANE_Auth_Callback authorize)
 
 	      continue;
 	    }
-	  DBG (2, "sane_init: trying to add %s\n", device_name);
-	  add_device_locked (device_name, 0);
+	  snprintf (orig_entry, sizeof (orig_entry), "%s", device_name);
+	  port = parse_host_port (device_name, &host, &next);
+	  if (port < 0 || *next)
+	    {
+	      DBG (1, "sane_init: ignoring malformed host entry %s\n",
+		   orig_entry);
+	      continue;
+	    }
+	  DBG (2, "sane_init: trying to add %s\n", host);
+	  add_device_locked (host, port, 0);
 	}
 
       fclose (fp);
@@ -1102,38 +1166,26 @@ sane_init (SANE_Int * version_code, SANE_Auth_Callback authorize)
   env = getenv ("SANE_NET_HOSTS");
   if (env)
     {
-      char *copy, *next, *host;
+      char *copy;
       if ((copy = strdup (env)) != NULL)
 	{
 	  next = copy;
-	  while ((host = strsep (&next, ":")))
+	  while (next && *next)
 	    {
-#ifdef ENABLE_IPV6
-	      if (host[0] == '[')
-		{
-		  /* skip '[' (host[0]) */
-		  host++;
-		  /* get the rest of the IPv6 addr (we're screwed if ] is missing)
-		   * Is it worth checking for the matching ] ? Not for now. */
-		  strsep (&next, "]");
-		  /* add back the ":" that got removed by the strsep() */
-		  host[strlen (host)] = ':';
-		  /* host now holds the IPv6 address */
+	      char *entry = next;
+	      char orig_entry[PATH_MAX];
 
-		  /* skip the ':' that could be after ] (avoids a call to strsep() */
-		  if (next[0] == ':')
-		    next++;
+	      snprintf (orig_entry, sizeof (orig_entry), "%s", entry);
+	      port = parse_host_port (entry, &host, &next);
+	      if (port < 0)
+		{
+		  DBG (1, "sane_init: ignoring malformed host entry %s\n",
+		       orig_entry);
+		  continue;
 		}
 
-	      /*
-	       * if the IPv6 is last in the list, the strsep() call in the while()
-	       * will return a string with the first char being '\0'. Skip it.
-	       */
-	      if (host[0] == '\0')
-		  continue;
-#endif /* ENABLE_IPV6 */
 	      DBG (2, "sane_init: trying to add %s\n", host);
-	      add_device_locked (host, 0);
+	      add_device_locked (host, port, 0);
 	    }
 	  free (copy);
 	}
@@ -1311,14 +1363,22 @@ sane_get_devices (const SANE_Device *** device_list, SANE_Bool local_only)
 	{
 	  SANE_Device *rdev;
 	  char *mem;
+	  char port_str[16];
 #ifdef ENABLE_IPV6
 	  SANE_Bool IPv6 = SANE_FALSE;
 #endif /* ENABLE_IPV6 */
 
 	  /* create a new device entry with a device name that is the
 	     sum of the backend name a colon and the backend's device
-	     name: */
-	  len = strlen (dev->name) + 1 + strlen (reply.device_list[i]->name);
+	     name.  A non-default port goes into the name too, so two
+	     servers on the same host stay addressable: */
+	  if (dev->port != default_port)
+	    snprintf (port_str, sizeof (port_str), ":%d", dev->port);
+	  else
+	    port_str[0] = '\0';
+
+	  len = strlen (dev->name) + strlen (port_str) + 1
+	    + strlen (reply.device_list[i]->name);
 
 #ifdef ENABLE_IPV6
 	  if (strchr (dev->name, ':') != NULL)
@@ -1353,6 +1413,7 @@ sane_get_devices (const SANE_Device *** device_list, SANE_Bool local_only)
 	    strcat (full_name, "]");
 #endif /* ENABLE_IPV6 */
 
+	  strcat (full_name, port_str);
 	  strcat (full_name, ":");
 	  strcat (full_name, reply.device_list[i]->name);
 	  DBG (3, "sane_get_devices: got %s\n", full_name);
@@ -1410,6 +1471,9 @@ sane_open (SANE_String_Const full_name, SANE_Handle * meta_handle)
   SANE_Word ack;
   Net_Device *dev;
   Net_Scanner *s;
+  char *open_name = NULL;
+  char *open_host, *open_next;
+  int open_port = 0;
   int need_auth;
 
   DBG (3, "sane_open(\"%s\")\n", full_name);
@@ -1540,16 +1604,55 @@ sane_open (SANE_String_Const full_name, SANE_Handle * meta_handle)
       return SANE_STATUS_INVAL;
     }
   else
-    for (dev = first_device; dev; dev = dev->next)
-      if (strcmp (dev->name, nd_name) == 0)
-	break;
+    {
+      open_name = strdup (nd_name);
+      if (!open_name)
+	{
+	  DBG (1, "sane_open: not enough free memory\n");
+	  return SANE_STATUS_NO_MEM;
+	}
+      open_port = parse_host_port (open_name, &open_host, &open_next);
+      if (open_port < 0)
+	{
+	  DBG (1, "sane_open: incorrect host name: %s\n", nd_name);
+	  free (open_name);
+	  return SANE_STATUS_INVAL;
+	}
+      nd_name = open_host;
+
+      if (open_port == default_port && dev_name[0])
+	{
+	  size_t len = strspn (dev_name, "0123456789");
+
+	  if (len > 0 && len < 8 && dev_name[len] == ':')
+	    {
+	      char port_str[8];
+	      int port;
+
+	      memcpy (port_str, dev_name, len);
+	      port_str[len] = '\0';
+
+	      port = parse_port (port_str);
+	      if (port > 0)
+		{
+		  open_port = port;
+		  dev_name += len + 1;
+		}
+	    }
+	}
+
+      for (dev = first_device; dev; dev = dev->next)
+	if (strcmp (dev->name, nd_name) == 0 && dev->port == open_port)
+	  break;
+    }
 
   if (!dev)
     {
       DBG (1,
 	   "sane_open: device %s not found, trying to register it anyway\n",
 	   nd_name);
-      status = add_device_locked (nd_name, &dev);
+      status = add_device_locked (nd_name, open_port, &dev);
+      free (open_name);
       if (status != SANE_STATUS_GOOD)
 	{
 	  DBG (1, "sane_open: could not open device\n");
@@ -1557,7 +1660,10 @@ sane_open (SANE_String_Const full_name, SANE_Handle * meta_handle)
 	}
     }
   else
-    DBG (2, "sane_open: device found in list\n");
+    {
+      free (open_name);
+      DBG (2, "sane_open: device found in list\n");
+    }
 
   if (dev->ctl < 0)
     {

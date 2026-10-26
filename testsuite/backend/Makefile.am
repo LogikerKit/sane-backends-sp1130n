@@ -8,11 +8,19 @@ if WITH_GENESYS_TESTS
 SUBDIRS = genesys
 endif
 
+check_PROGRAMS = net_test
+TESTS = $(check_PROGRAMS)
+
+net_test_SOURCES = net_test.c
+net_test_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir) -I$(top_srcdir)/include \
+	-I$(top_builddir)/include $(AVAHI_CFLAGS)
+net_test_LDADD = ../../sanei/libsanei.la ../../lib/liblib.la \
+	$(AVAHI_LIBS)
+
 if have_libavahi
 if have_libcurl
 if have_libxml2
-check_PROGRAMS = escl_test
-TESTS = $(check_PROGRAMS)
+check_PROGRAMS += escl_test
 
 escl_test_SOURCES = escl_test.c
 escl_test_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir) -I$(top_srcdir)/include \

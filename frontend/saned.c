@@ -283,7 +283,8 @@ static int allow_network;
 static int data_connect_timeout = 4000;
 static Handle *handle;
 static char *bind_addr;
-static short bind_port = -1;
+static int bind_port = -1;
+static int bound_port = -1;
 static size_t buffer_size = (1 * 1024 * 1024);
 static union
 {
@@ -2691,7 +2692,7 @@ saned_create_avahi_services (AvahiClient *c)
       proto = AVAHI_PROTO_INET;
 #endif /* ENABLE_IPV6 */
 
-      ret = avahi_entry_group_add_service (avahi_group, AVAHI_IF_UNSPEC, proto, 0, avahi_svc_name, SANED_SERVICE_DNS, NULL, NULL, SANED_SERVICE_PORT, txt, NULL);
+      ret = avahi_entry_group_add_service (avahi_group, AVAHI_IF_UNSPEC, proto, 0, avahi_svc_name, SANED_SERVICE_DNS, NULL, NULL, bound_port, txt, NULL);
       if (ret < 0)
 	{
 	  if (ret == AVAHI_ERR_COLLISION)
@@ -2913,7 +2914,7 @@ static void
 do_bindings_family (int family, struct addrinfo *res)
 {
   struct addrinfo *resp;
-  short sane_port;
+  int sane_port;
   int fd = -1;
   int on = 1;
   int i;
@@ -2994,18 +2995,28 @@ do_bindings_family (int family, struct addrinfo *res)
 	    {
 	      if (resp->ai_family == AF_INET)
 		{
-		  DBG (DBG_INFO, "do_bindings: [%d] selected ephemeral port: %d\n", i, ntohs(((struct sockaddr_in *) resp->ai_addr)->sin_port));
+		  sane_port = ntohs(((struct sockaddr_in *) resp->ai_addr)->sin_port);
+		  DBG (DBG_INFO, "do_bindings: [%d] selected ephemeral port: %d\n", i, sane_port);
 		}
 
 #ifdef ENABLE_IPV6
 	      if (resp->ai_family == AF_INET6)
 		{
-		  DBG (DBG_INFO, "do_bindings: [%d] selected ephemeral port: %d\n", i, ntohs(((struct sockaddr_in6 *) resp->ai_addr)->sin6_port));
+		  sane_port = ntohs(((struct sockaddr_in6 *) resp->ai_addr)->sin6_port);
+		  DBG (DBG_INFO, "do_bindings: [%d] selected ephemeral port: %d\n", i, sane_port);
 		}
 
 #endif /* ENABLE_IPV6 */
 
 	    }
+	}
+
+      if (sane_port != 0)
+	{
+	  if (bind_port <= 0)
+	    bind_port = sane_port;
+	  if (bound_port == -1)
+	    bound_port = sane_port;
 	}
 
       add_fd(fd, SANED_FD_LISTENER, POLLIN);
@@ -3068,7 +3079,7 @@ do_bindings (void)
 {
   struct sockaddr_in sin;
   struct servent *serv;
-  short port;
+  int port;
   int fd = -1;
   int on = 1;
 
@@ -3117,6 +3128,12 @@ do_bindings (void)
       DBG (DBG_ERR, "do_bindings: listen failed: %s\n", strerror (errno));
       bail_out (1);
     }
+
+  {
+    socklen_t len = sizeof (sin);
+    if (getsockname(fd, (struct sockaddr *) &sin, &len) != -1)
+      bound_port = ntohs (sin.sin_port);
+  }
 
   add_fd(fd, SANED_FD_LISTENER, POLLIN);
 }
