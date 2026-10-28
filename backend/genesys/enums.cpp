@@ -187,6 +187,7 @@ std::ostream& operator<<(std::ostream& out, SensorId id)
         case SensorId::CIS_CANON_LIDE_35: out << "CIS_CANON_LIDE_35"; break;
         case SensorId::CIS_CANON_LIDE_60: out << "CIS_CANON_LIDE_60"; break;
         case SensorId::CIS_CANON_LIDE_80: out << "CIS_CANON_LIDE_80"; break;
+        case SensorId::CIS_CANON_LIDE_500F: out << "CIS_CANON_LIDE_500F"; break;
         case SensorId::CIS_CANON_LIDE_90: out << "CIS_CANON_LIDE_90"; break;
         case SensorId::CIS_CANON_LIDE_100: out << "CIS_CANON_LIDE_100"; break;
         case SensorId::CIS_CANON_LIDE_110: out << "CIS_CANON_LIDE_110"; break;

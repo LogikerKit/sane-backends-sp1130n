@@ -2868,7 +2868,8 @@ static void compute_averaged_planar(Genesys_Device * dev, const Genesys_Sensor& 
     avgpixels = 15;
 
   /* LiDE80 packs shading data */
-  if (dev->model->sensor_id != SensorId::CIS_CANON_LIDE_80)
+  if (dev->model->sensor_id != SensorId::CIS_CANON_LIDE_80 &&
+      dev->model->sensor_id != SensorId::CIS_CANON_LIDE_500F)
     {
       factor=1;
       fill=avgpixels;
@@ -3260,7 +3261,8 @@ static void genesys_send_shading_coefficient(Genesys_Device* dev, const Genesys_
   /* special case, memory is aligned on 0x5400, this has yet to be explained */
   /* could be 0xa800 because sensor is truly 2400 dpi, then halved because
    * we only set 1200 dpi */
-  if(dev->model->sensor_id==SensorId::CIS_CANON_LIDE_80)
+  if (dev->model->sensor_id == SensorId::CIS_CANON_LIDE_80 ||
+      dev->model->sensor_id == SensorId::CIS_CANON_LIDE_500F)
     {
       words_per_color = 0x5400;
     }
@@ -3472,6 +3474,7 @@ static void genesys_send_shading_coefficient(Genesys_Device* dev, const Genesys_
                                0x0a00);
       break;
     case SensorId::CIS_CANON_LIDE_80:
+    case SensorId::CIS_CANON_LIDE_500F:
       compute_averaged_planar (dev, sensor,
                                shading_data.data(),
                                pixels_per_line,

@@ -63,6 +63,10 @@ gl841_init_registers (Genesys_Device * dev)
     if (dev->model->model_id == ModelId::CANON_LIDE_80) {
         dev->reg.init_reg(0x01, 0x82);
     }
+    // Canon's driver never sets CISSET on the LiDE 500F
+    if (dev->model->sensor_id == SensorId::CIS_CANON_LIDE_500F) {
+        dev->reg.find_reg(0x01).value &= ~REG_0x01_CISSET;
+    }
 
     dev->reg.init_reg(0x02, 0x38);
     if (dev->model->model_id == ModelId::CANON_LIDE_80) {

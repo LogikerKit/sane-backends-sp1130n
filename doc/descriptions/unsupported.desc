@@ -395,13 +395,6 @@
 :status :unsupported
 :comment "Not supported. However, a stand-alone program for FreeBSD is available."
 
-:model "CanoScan LiDE 500F"
-:url "unsupported/canon-canoscan-lide-500f.html"
-:interface "USB"
-:usbid "0x04a9" "0x221f"
-:status :unsupported
-:comment "GL841 based, to be added to genesys backend"
-
 :model "FS4000"
 :url "unsupported/canon-fs4000.html"
 :interface "USB SCSI"

@@ -1162,6 +1162,16 @@ void genesys_init_usb_device_tables()
 
     s_usb_devices->emplace_back(0x04a9, 0x2214, model);
 
+    // LiDE 500F (GL841): shares the LiDE 80 model, since like the LiDE 80 it needs
+    // register 0x6b = 0x0c before PWRBIT or it drops off the bus.
+    model.name = "canon-lide-500f";
+    model.model = "LiDE 500F";
+    model.sensor_id = SensorId::CIS_CANON_LIDE_500F;
+    // The LiDE 80's 4.5 mm lands on a dark band on the 500F (about 4.2-5.4 mm
+    // from home); its white area is at about 1.0-3.4 mm.
+    model.y_offset_calib_white = 2.0;
+    s_usb_devices->emplace_back(0x04a9, 0x221f, model);
+
 
     model = Genesys_Model();
     model.name = "canon-lide-90";
