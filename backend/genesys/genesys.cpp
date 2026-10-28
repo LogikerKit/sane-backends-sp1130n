@@ -1889,9 +1889,11 @@ void scanner_coarse_gain_calibration(Genesys_Device& dev, const Genesys_Sensor& 
         {
             std::vector<std::uint16_t> values;
             // FIXME: start from the second line because the first line often has artifacts. Probably
-            // caused by unclean cleanup of previous scan
+            // caused by unclean cleanup of previous scan. GL841 scans a single line, so there the
+            // first line is all there is.
+            std::size_t y = image.get_height() > 1 ? 1 : 0;
             for (std::size_t x = pixels / 4; x < (pixels * 3 / 4); x++) {
-                values.push_back(image.get_raw_channel(x, 1, ch));
+                values.push_back(image.get_raw_channel(x, y, ch));
             }
 
             // pick target value at 95th percentile of all values. There may be a lot of black values
