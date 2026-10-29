@@ -1,0 +1,11 @@
+; Experimental reconstruction; synthetic tests are not hardware validation.
+:backend "sp1130n"
+:version "1.0.3"
+:manpage "sane-sp1130n"
+:devicetype :scanner
+:mfg "Ricoh"
+:model "SP-1130N"
+:status :untested
+:interface "USB Ethernet"
+:usbid "0x05ca" "0x031e"
+:comment "Experimental, explicit opt-in. USB and native plaintext IPv4 TCP; duplex is default. No physical device validation, LAN discovery or encrypted mode."

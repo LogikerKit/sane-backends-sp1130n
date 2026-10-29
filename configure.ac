@@ -383,6 +383,7 @@ AC_ARG_WITH(usb,
   AS_HELP_STRING([--with-usb], [enable USB support @<:@default=check@:>@]),
   [],
   [with_usb=check])
+have_libusb1=no
 AS_IF([test xno != "x$with_usb"],
   [have_usb=no
    AS_CASE(x$host_os,           dnl odd-ball operating systems first
@@ -407,6 +408,7 @@ AS_IF([test xno != "x$with_usb"],
       [AC_DEFINE([HAVE_LIBUSB], [1],
         [Define to 1 if you have libusb-1.0])
        have_usb=yes
+       have_libusb1=yes
       ],
       [PKG_CHECK_MODULES([USB], [libusb >= 0.1.8],
         [AC_DEFINE([HAVE_LIBUSB_LEGACY], [1],
@@ -681,7 +683,7 @@ ALL_BACKENDS="abaton agfafocus apple artec artec_eplus48u as6e \
         matsushita microtek microtek2 mustek mustek_pp \
         mustek_usb mustek_usb2 nec net niash pie pieusb pint \
         pixma plustek plustek_pp qcam ricoh ricoh2 rts8891 s9036 \
-        sceptre sharp sm3600 sm3840 snapscan sp15c st400 \
+        sceptre sharp sm3600 sm3840 snapscan sp1130n sp15c st400 \
         stv680 tamarack teco1 teco2 teco3 test u12 umax \
         umax_pp umax1220u v4l xerox_mfp p5"
 
@@ -726,6 +728,7 @@ BACKENDS="$FILTERED_BACKENDS"
 BACKEND_LIBS_ENABLED=""
 BACKEND_CONFS_ENABLED=""
 BACKEND_MANS_ENABLED=""
+with_sp1130n_tests=no
 for backend in ${BACKENDS} ; do
   BACKEND_LIBS_ENABLED="${BACKEND_LIBS_ENABLED} libsane-${backend}.la"
   BACKEND_CONFS_ENABLED="${BACKEND_CONFS_ENABLED} ${backend}.conf"
@@ -736,10 +739,14 @@ for backend in ${BACKENDS} ; do
   if test x$backend = xumax_pp; then
     install_umax_pp_tools=yes
   fi
+  if test x$backend = xsp1130n; then
+    with_sp1130n_tests=yes
+  fi
 done
 AC_SUBST(BACKEND_LIBS_ENABLED)
 AM_CONDITIONAL(WITH_GENESYS_TESTS, test xyes = x$with_genesys_tests)
 AM_CONDITIONAL(INSTALL_UMAX_PP_TOOLS, test xyes = x$install_umax_pp_tools)
+AM_CONDITIONAL(WITH_SP1130N_TESTS, test xyes = x$with_sp1130n_tests)
 
 AC_ARG_VAR(PRELOADABLE_BACKENDS, [list of backends to preload into single DLL])
 if test "${enable_preload}" = "auto"; then
@@ -830,6 +837,7 @@ AC_CONFIG_FILES([Makefile lib/Makefile sanei/Makefile frontend/Makefile \
   japi/Makefile backend/Makefile include/Makefile doc/Makefile \
   po/Makefile.in testsuite/Makefile \
   testsuite/backend/Makefile \
+  testsuite/backend/sp1130n/Makefile \
   testsuite/backend/genesys/Makefile \
   testsuite/sanei/Makefile testsuite/tools/Makefile \
   testsuite/saned/Makefile \

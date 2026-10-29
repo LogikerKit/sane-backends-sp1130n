@@ -8,6 +8,7 @@ include/sane/saneopts.h
 # Translatable SANE status strings
 
 backend/sane_strstatus.c
+backend/sp1130n.c
 
 # Remainder of this file created with
 #

@@ -85,6 +85,8 @@ sharp
 sm3600
 sm3840
 snapscan
+# Experimental, hardware-unvalidated; requires explicit build and scan opt-in.
+#sp1130n
 sp15c
 #st400
 #stv680

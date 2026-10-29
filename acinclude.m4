@@ -611,6 +611,27 @@ FILTERED_BACKENDS=""
 for be in ${BACKENDS}; do
   backend_supported="yes"
   case $be in
+    sp1130n)
+    # Hardware-unvalidated: build only when explicitly named in BACKENDS.
+    if test "${user_selected_backends}" != "yes"; then
+      backend_supported="no"
+    else
+      case "$host_os" in
+        linux*) ;;
+        *)
+        echo "*** $be backend currently requires Linux - $DISABLE_MSG"
+        backend_supported="no"
+        ;;
+      esac
+      if test "${have_libusb1}" != "yes" \
+        || test "${sane_cv_use_libjpeg}" != "yes" \
+        || test "${have_pthread}" != "yes"; then
+        echo "*** $be requires libusb-1.0, JPEG and pthread - $DISABLE_MSG"
+        backend_supported="no"
+      fi
+    fi
+    ;;
+
     plustek_pp)
     case "$host_os" in
       gnu*)

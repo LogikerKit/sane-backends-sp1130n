@@ -4,9 +4,14 @@
 ##  This file is part of the "Sane" build infra-structure.  See
 ##  included LICENSE file for license information.
 
+SUBDIRS =
 if WITH_GENESYS_TESTS
-SUBDIRS = genesys
+SUBDIRS += genesys
 endif
+if WITH_SP1130N_TESTS
+SUBDIRS += sp1130n
+endif
+DIST_SUBDIRS = genesys sp1130n
 
 check_PROGRAMS = net_test
 TESTS = $(check_PROGRAMS)

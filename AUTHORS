@@ -98,6 +98,7 @@ Backends:
  snapscan:      Kevin Charter, Franck Schneider, Michel Roelofs, Sebastien
                 Sable, Henrik Johansson, Chris Bagwell, and Oliver Schwartz (*)
  sp15c:         Randolph Bentson
+ sp1130n:       sp1130n-open contributors
  st400:         Ingo Wilken
  stv680:        Gerard Klaver
  tamarack:      Rogier Wolff

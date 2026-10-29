@@ -1,0 +1,86 @@
+.TH sane-sp1130n 5 "25 October 2026" "@PACKAGEVERSION@" "SANE Scanner Access Now Easy"
+.SH NAME
+sane-sp1130n \- experimental Ricoh SP-1130N USB and native LAN backend
+.SH DESCRIPTION
+The
+.B sp1130n
+backend is an experimental, hardware-unvalidated scanner driver.
+Duplex scanning is the default. Front-only and back-only sources are available.
+Do not interpret synthetic test results as successful scans on real hardware.
+.PP
+Build it explicitly with
+.BR "BACKENDS=sp1130n" .
+The default backend selection excludes it and the default dll.conf entry is
+commented out. To use it, add sp1130n to the process's isolated dll.conf or a
+separately reviewed SANE configuration. No vendor library or firmware is loaded.
+.SH DEVICES
+The USB device ID is 05ca:031e. Device names are
+.BR sp1130n:usb:BUS:ADDRESS .
+Use the name returned by scanimage \-L. The older non-N SP1130 and other Ricoh
+devices are not inferred compatible.
+.PP
+Native LAN is selected explicitly as
+.BR sp1130n:tcp:IPv4
+or
+.BR sp1130n:tcp:IPv4:PORT .
+The default TCP port is 16888. Only numeric unicast IPv4 is accepted.
+LAN is not enumerated, and no DNS lookup, broadcast, address change, eSCL or
+WSD discovery is performed. Reported encryption is conservatively refused.
+Plaintext transfer has no confidentiality or server authentication. Use a
+trusted network and non-sensitive, replaceable originals for initial tests.
+.SH OPTIONS
+The source is ADF Duplex, ADF Front or ADF Back. Modes are Color, Gray or
+Lineart. USB resolutions are 300 or 600 dpi; LAN is restricted to full A4 at
+300 dpi with front/back output selected on the host. Duplex buffers both sides after one
+sheet acquisition and returns the front image followed by the back image.
+A client must use start/read/EOF/start/read/EOF without cancelling between sides.
+.PP
+Physical page dimensions and the tl-x, tl-y, br-x and br-y acquisition window
+use integer millimeters on USB. These options are inactive for LAN.
+Invalid or unsupported profiles are rejected before scanner I/O.
+Brightness, contrast, threshold and back-rotate are computer-side processing.
+Autocrop, deskew and skip-blank are optional and disabled by default. Blank
+filtering may discard faint marks and changes front/back numbering. At most
+32 fully blank sheets are acquired per start.
+.PP
+LAN retains the image socket and client lock across sheets in one feeder job.
+There is no prepare/start/stop cycle between sheets. Cancel requests termination
+using lock-free atomic state; bounded cleanup occurs in the next normal backend
+call or on close, never in a signal handler. USB finishes pending command/data
+transactions and final completion records before cleanup. Its image phase has
+a 120-second timeout budget, followed by up to 25 seconds for STOP/unlock.
+After end-of-feeder or
+a failed LAN job,
+cancel or reopen before starting another job. Option changes during a live
+job are refused.
+.SH ENVIRONMENT
+.TP
+.B SP1130N_EXPERIMENTAL
+Must be exactly 1 before scanning. Otherwise sane_start returns unsupported.
+Opening a LAN handle is lazy and does not contact the scanner.
+.SH EXAMPLE
+Replace the example address with the scanner's actual IPv4 address:
+.PP
+.nf
+SP1130N_EXPERIMENTAL=1 scanimage \\
+  \-d sp1130n:tcp:192.168.1.50 \-\-source "ADF Duplex" \\
+  \-\-batch=side-%03d.pnm \-\-batch-count=2 \-\-format=pnm
+.fi
+.SH LIMITATIONS
+This initial port is Linux-only and requires libusb-1.0, libjpeg and pthreads.
+Only one SANE handle can be open. Discovery, encryption negotiation, scanner
+configuration, vendor calibration, maintenance resets and firmware upload are
+not implemented. Scanner faults or transport failure can leave a device lock
+despite bounded cleanup. A frontend that cancels between pages loses the
+buffered back image and ends the feeder job. LAN front/back byte interpretation
+is provisional. LAN lock/status and abort cleanup
+remain unverified. No physical USB or LAN scanner was tested.
+Short-header-only streams without a full side-identifying status record are
+unsupported; front/back identity is never inferred from arrival order.
+.SH LICENSE
+The SP-1130N implementation and its synthetic tests are licensed under MIT;
+see backend/sp1130n-license.txt. Existing SANE files retain their own licenses.
+.SH SEE ALSO
+.BR sane (7),
+.BR scanimage (1),
+.BR sane-dll (5)

@@ -64,5 +64,17 @@ test-suite.log
 /sane-backends-*.tar.gz
 
 # editor temp files
+/testsuite/backend/sp1130n/test_protocol
+/testsuite/backend/sp1130n/test_backend
+/testsuite/backend/sp1130n/test_image
+/testsuite/backend/sp1130n/test_image_alloc
+/testsuite/backend/sp1130n/test_postprocess
+/testsuite/backend/sp1130n/test_postprocess_alloc
+/testsuite/backend/sp1130n/network_fixture
+/testsuite/backend/sp1130n/sp1130nctl
+/testsuite/backend/sp1130n/*.log
+/testsuite/backend/sp1130n/*.trs
+__pycache__/
+/.tarball-version
 *~
 \#*\#
