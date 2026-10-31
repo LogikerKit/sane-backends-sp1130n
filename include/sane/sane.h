@@ -118,6 +118,7 @@ SANE_Device;
 
 #define SANE_OPTION_IS_ACTIVE(cap)	(((cap) & SANE_CAP_INACTIVE) == 0)
 #define SANE_OPTION_IS_SETTABLE(cap)	(((cap) & SANE_CAP_SOFT_SELECT) != 0)
+#define SANE_OPTION_IS_READONLY(cap)	(!((cap) & SANE_CAP_SOFT_SELECT) && ((cap) & SANE_CAP_SOFT_DETECT))
 
 #define SANE_INFO_INEXACT		(1 << 0)
 #define SANE_INFO_RELOAD_OPTIONS	(1 << 1)
