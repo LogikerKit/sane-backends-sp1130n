@@ -30,8 +30,12 @@
 #define v4l_h
 
 #include <../include/sane/sane.h>
+#include <linux/videodev2.h>
 
 #define MAX_CHANNELS 32
+#define MAX_FRAME_SIZES 64
+#define MIN(a,b) (((a) < (b)) ? (a) : (b))
+#define MAX(a,b) (((a) > (b)) ? (a) : (b))
 
 typedef enum
 {
@@ -47,6 +51,7 @@ typedef enum
   OPT_MODE_GROUP,
   OPT_MODE,
   OPT_CHANNEL,
+  OPT_FRAME_SIZE,
 
   OPT_GEOMETRY_GROUP,
   OPT_TL_X,			/* top-left x */
@@ -86,17 +91,23 @@ typedef struct V4L_Scanner
   SANE_Int user_corner;		/* bitmask of user-selected coordinates */
   SANE_Bool scanning;
   SANE_Bool deliver_eof;
-  SANE_Bool is_mmap;		/* Do we use mmap ? */
-  /* state for reading a frame: */
-  size_t num_bytes;		/* # of bytes read so far */
-  size_t bytes_per_frame;	/* total number of bytes in frame */
-  struct video_capability capability;
-  struct video_picture pict;
-  struct video_window window;
-  struct video_mbuf mbuf;
-  struct video_mmap mmap;
+  SANE_Bool gray_mode;
+  SANE_Bool is_mmap;
+  SANE_Bool streaming;
+  SANE_Bool format_converted;
+  void *buffer;
+  size_t buffer_size;
+  size_t frame_size;
+  size_t offset;
+  struct v4l2_capability capability;
+  struct v4l2_format format;
   SANE_String_Const channel[MAX_CHANNELS];
-  SANE_Int buffercount;
+  SANE_String_Const frame_size_list[MAX_FRAME_SIZES + 1];
+  char frame_size_names[MAX_FRAME_SIZES][32];
+  SANE_Range geometry_range[4];
+  unsigned frame_size_count;
+  __u32 frame_width;
+  __u32 frame_height;
 }
 V4L_Scanner;
 

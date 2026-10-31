@@ -1,470 +1,931 @@
 /* sane - Scanner Access Now Easy.
-   Copyright (C) 1999 Juergen G. Schimmer
-   Updates and bugfixes (C) 2002 - 2004 Henning Meier-Geinitz
+   This file implements a SANE backend for V4L2 video devices.
 
    This file is part of the SANE package.
 
-   This program is free software; you can redistribute it and/or
-   modify it under the terms of the GNU General Public License as
-   published by the Free Software Foundation; either version 2 of the
-   License, or (at your option) any later version.
+   This program is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by the
+   Free Software Foundation; either version 3 of the License, or (at your
+   option) any later version.
+ */
 
-   This program is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-   As a special exception, the authors of SANE give permission for
-   additional uses of the libraries contained in this release of SANE.
-
-   The exception is that, if you link a SANE library with other files
-   to produce an executable, this does not by itself cause the
-   resulting executable to be covered by the GNU General Public
-   License.  Your use of that executable is in no way restricted on
-   account of linking the SANE library code into it.
-
-   This exception does not, however, invalidate any other reasons why
-   the executable file might be covered by the GNU General Public
-   License.
-
-   If you submit changes to SANE to the maintainers to be included in
-   a subsequent release, you agree by submitting the changes that
-   those changes may be distributed with this exception intact.
-
-   If you write modifications of your own for SANE, it is your choice
-   whether to permit this exception to apply to your modifications.
-   If you do not wish that, delete this exception notice.
-
-   This file implements a SANE backend for v4l-Devices.
-*/
-
-#define BUILD 5
+#define BUILD 6
 
 #include "../include/sane/config.h"
 
-#include <assert.h>
-#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <math.h>
-#include <setjmp.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <sys/mman.h>
-
-#include <unistd.h>
-#include <sys/time.h>
-#include <sys/stat.h>
-
-#include "../include/sane/sane.h"
-#include "../include/sane/sanei.h"
-#include "../include/sane/saneopts.h"
-
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <poll.h>
+#include <stdint.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <linux/videodev2.h>
+#include <libv4l2.h>
 
 #define BACKEND_NAME v4l
 #include "../include/sane/sanei_backend.h"
-
-#ifndef PATH_MAX
-# define PATH_MAX       1024
-#endif
-
 #include "../include/sane/sanei_config.h"
-#define V4L_CONFIG_FILE "v4l.conf"
-
-#include <libv4l1.h>
+#include "../include/sane/saneopts.h"
 #include "v4l.h"
 
-static const SANE_Device **devlist = NULL;
-static int num_devices;
+#define V4L_CONFIG_FILE "v4l.conf"
+#define V4L_CAPTURE_TIMEOUT_MS 5000
+#define V4L_PROBE_TIMEOUT_MS 3000
+
+static const SANE_Device **devlist;
 static V4L_Device *first_dev;
 static V4L_Scanner *first_handle;
-static char *buffer;
+static int num_devices;
+
+void sane_cancel (SANE_Handle handle);
 
 static const SANE_String_Const mode_list[] = {
-  SANE_VALUE_SCAN_MODE_GRAY, SANE_VALUE_SCAN_MODE_COLOR,
-  0
+  SANE_VALUE_SCAN_MODE_GRAY, SANE_VALUE_SCAN_MODE_COLOR, NULL
 };
 
-static const SANE_Range u8_range = {
-  /* min, max, quantization */
-  0, 255, 0
-};
+static const SANE_Range u8_range = { 0, 255, 0 };
 
-static SANE_Range x_range = { 0, 338, 2 };
+static void
+free_channels (V4L_Scanner *s)
+{
+  int i;
+  for (i = 0; i < MAX_CHANNELS; i++)
+    {
+      free ((void *) s->channel[i]);
+      s->channel[i] = NULL;
+    }
+}
 
-static SANE_Range odd_x_range = { 1, 339, 2 };
+static V4L_Scanner *
+find_handle (SANE_Handle handle)
+{
+  V4L_Scanner *s;
+  for (s = first_handle; s; s = s->next)
+    if (s == handle)
+      return s;
+  return NULL;
+}
 
-static SANE_Range y_range = { 0, 249, 1 };
+static int
+xioctl (int fd, unsigned long request, void *arg)
+{
+  int result;
+  do
+    result = v4l2_ioctl (fd, request, arg);
+  while (result == -1 && errno == EINTR);
+  return result;
+}
 
-static SANE_Range odd_y_range = { 1, 250, 1 };
-
-
-static SANE_Parameters parms = {
-  SANE_FRAME_RGB,
-  1,				/* 1 = Last Frame , 0 = More Frames to come */
-  0,				/* Number of bytes returned per scan line: */
-  0,				/* Number of pixels per scan line.  */
-  0,				/* Number of lines for the current scan.  */
-  8,				/* Number of bits per sample. */
-};
+static void
+debug_format (int level, const char *label, const struct v4l2_pix_format *format)
+{
+  DBG (level, "%s: %c%c%c%c %ux%u, bytesperline=%u, sizeimage=%u\n",
+       label,
+       format->pixelformat & 0xff,
+       (format->pixelformat >> 8) & 0xff,
+       (format->pixelformat >> 16) & 0xff,
+       (format->pixelformat >> 24) & 0xff,
+       format->width, format->height, format->bytesperline,
+       format->sizeimage);
+}
 
 static SANE_Status
-attach (const char *devname, V4L_Device ** devp)
+wait_for_frame (int fd, int timeout_ms)
+{
+  struct pollfd poll_fd;
+  int result;
+
+  poll_fd.fd = fd;
+  poll_fd.events = POLLIN;
+  poll_fd.revents = 0;
+  do
+    result = poll (&poll_fd, 1, timeout_ms);
+  while (result == -1 && errno == EINTR);
+  if (result <= 0
+      || !(poll_fd.revents & POLLIN)
+      || (poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+    return SANE_STATUS_IO_ERROR;
+  return SANE_STATUS_GOOD;
+}
+
+static SANE_Status
+dequeue_frame (int fd, struct v4l2_buffer *buf, int timeout_ms)
+{
+  struct timespec start;
+  struct timespec now;
+
+  if (clock_gettime (CLOCK_MONOTONIC, &start) == -1)
+    return SANE_STATUS_IO_ERROR;
+
+  while (1)
+    {
+      int elapsed;
+      int wait_ms;
+
+      if (clock_gettime (CLOCK_MONOTONIC, &now) == -1)
+        return SANE_STATUS_IO_ERROR;
+      elapsed = (int) ((now.tv_sec - start.tv_sec) * 1000
+                       + (now.tv_nsec - start.tv_nsec) / 1000000);
+      if (elapsed >= timeout_ms)
+        break;
+      wait_ms = MIN (250, timeout_ms - elapsed);
+
+      if (wait_for_frame (fd, wait_ms) == SANE_STATUS_GOOD)
+        {
+          if (xioctl (fd, VIDIOC_DQBUF, buf) == 0)
+            return SANE_STATUS_GOOD;
+
+          if (errno != EAGAIN)
+            return SANE_STATUS_IO_ERROR;
+
+          DBG (4, "mmap capture: VIDIOC_DQBUF returned EAGAIN, retrying\n");
+        }
+    }
+
+  DBG (3, "mmap capture: timed out waiting for a dequeued frame\n");
+  return SANE_STATUS_IO_ERROR;
+}
+
+static ssize_t
+read_frame (int fd, void *buffer, size_t size, int timeout_ms)
+{
+  int elapsed = 0;
+
+  while (elapsed < timeout_ms)
+    {
+      if (wait_for_frame (fd, 250) == SANE_STATUS_GOOD)
+        {
+          ssize_t result = v4l2_read (fd, buffer, size);
+          if (result > 0)
+            return result;
+
+          if (result == -1 && errno != EAGAIN)
+            return -1;
+
+          DBG (4, "capture read path: v4l2_read returned EAGAIN, retrying\n");
+        }
+
+      elapsed += 250;
+    }
+
+  DBG (3, "capture read path: timed out waiting for a readable frame\n");
+  errno = ETIMEDOUT;
+  return -1;
+}
+
+static SANE_Status
+query_capability (int fd, struct v4l2_capability *cap)
+{
+  __u32 capabilities;
+  if (xioctl (fd, VIDIOC_QUERYCAP, cap) == -1)
+    return SANE_STATUS_INVAL;
+  capabilities = (cap->capabilities & V4L2_CAP_DEVICE_CAPS)
+    ? cap->device_caps : cap->capabilities;
+  if (!(capabilities & V4L2_CAP_VIDEO_CAPTURE)
+      || !(capabilities & (V4L2_CAP_READWRITE | V4L2_CAP_STREAMING)))
+    return SANE_STATUS_UNSUPPORTED;
+  return SANE_STATUS_GOOD;
+}
+
+static SANE_Bool
+has_supported_format (int fd)
+{
+  struct v4l2_fmtdesc format;
+  unsigned int index;
+
+  for (index = 0; index < 256; index++)
+    {
+      memset (&format, 0, sizeof (format));
+      format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      format.index = index;
+      if (xioctl (fd, VIDIOC_ENUM_FMT, &format) == -1)
+        break;
+      if (format.pixelformat == V4L2_PIX_FMT_MJPEG
+          || format.pixelformat == V4L2_PIX_FMT_YUYV
+          || format.pixelformat == V4L2_PIX_FMT_RGB24
+          || format.pixelformat == V4L2_PIX_FMT_GREY)
+        return SANE_TRUE;
+    }
+  return SANE_FALSE;
+}
+
+static SANE_Bool
+probe_capture (int fd)
+{
+  struct v4l2_capability capability;
+  struct v4l2_format format;
+  struct v4l2_requestbuffers request;
+  struct v4l2_buffer buffer;
+  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  void *mapping = MAP_FAILED;
+  size_t size;
+  ssize_t result;
+  SANE_Bool streaming = SANE_FALSE;
+  SANE_Bool mmap_capture = SANE_FALSE;
+  SANE_Bool success = SANE_FALSE;
+  __u32 capabilities;
+
+  memset (&capability, 0, sizeof (capability));
+  if (query_capability (fd, &capability) != SANE_STATUS_GOOD)
+    return SANE_FALSE;
+  capabilities = (capability.capabilities & V4L2_CAP_DEVICE_CAPS)
+    ? capability.device_caps : capability.capabilities;
+  memset (&format, 0, sizeof (format));
+  format.type = type;
+  if (xioctl (fd, VIDIOC_G_FMT, &format) == -1)
+    return SANE_FALSE;
+  debug_format (4, "probe format", &format.fmt.pix);
+
+  if (capabilities & V4L2_CAP_READWRITE)
+    {
+      DBG (4, "probe: trying read capture\n");
+      size = format.fmt.pix.sizeimage;
+      if (!size)
+        size = (size_t) format.fmt.pix.width * format.fmt.pix.height * 4;
+      mapping = malloc (size);
+      if (mapping == NULL)
+        return SANE_FALSE;
+      if (wait_for_frame (fd, V4L_PROBE_TIMEOUT_MS) == SANE_STATUS_GOOD)
+        {
+          result = v4l2_read (fd, mapping, size);
+          success = result > 0;
+          DBG (4, "probe: read returned %zd bytes\n", result);
+        }
+      else
+        DBG (3, "probe: read frame timed out: %s\n",
+             strerror (errno));
+      if (success)
+        goto cleanup;
+      free (mapping);
+      mapping = MAP_FAILED;
+    }
+
+  if (capabilities & V4L2_CAP_STREAMING)
+    {
+      DBG (4, "probe: trying mmap streaming\n");
+      memset (&request, 0, sizeof (request));
+      request.count = 1;
+      request.type = type;
+      request.memory = V4L2_MEMORY_MMAP;
+      if (xioctl (fd, VIDIOC_REQBUFS, &request) == -1 || request.count < 1)
+        return SANE_FALSE;
+      memset (&buffer, 0, sizeof (buffer));
+      buffer.type = type;
+      buffer.memory = V4L2_MEMORY_MMAP;
+      buffer.index = 0;
+      if (xioctl (fd, VIDIOC_QUERYBUF, &buffer) == -1)
+        return SANE_FALSE;
+      mapping = v4l2_mmap (NULL, buffer.length, PROT_READ | PROT_WRITE,
+                           MAP_SHARED, fd, buffer.m.offset);
+      if (mapping == MAP_FAILED)
+        return SANE_FALSE;
+      mmap_capture = SANE_TRUE;
+      if (xioctl (fd, VIDIOC_QBUF, &buffer) == -1
+          || xioctl (fd, VIDIOC_STREAMON, &type) == -1)
+        goto cleanup;
+      streaming = SANE_TRUE;
+      if (wait_for_frame (fd, V4L_PROBE_TIMEOUT_MS) == SANE_STATUS_GOOD
+          && xioctl (fd, VIDIOC_DQBUF, &buffer) == 0)
+        success = SANE_TRUE;
+      else
+        DBG (3, "probe: first mmap frame timed out or dequeue failed: %s\n",
+             strerror (errno));
+    }
+
+cleanup:
+  if (streaming)
+    xioctl (fd, VIDIOC_STREAMOFF, &type);
+  if (mapping != MAP_FAILED)
+    {
+      if (mmap_capture)
+        v4l2_munmap (mapping, buffer.length);
+      else
+        free (mapping);
+    }
+  return success;
+}
+
+static SANE_Status
+attach (const char *devname)
 {
   V4L_Device *dev;
-  static int v4lfd;
-  static struct video_capability capability;
-
-  errno = 0;
+  struct v4l2_capability cap;
+  int fd;
 
   for (dev = first_dev; dev; dev = dev->next)
     if (strcmp (dev->sane.name, devname) == 0)
-      {
-	if (devp)
-	  *devp = dev;
-	DBG (5, "attach: device %s is already known\n", devname);
-	return SANE_STATUS_GOOD;
-      }
+      return SANE_STATUS_GOOD;
 
-  DBG (3, "attach: trying to open %s\n", devname);
-  v4lfd = v4l1_open (devname, O_RDWR);
-  if (v4lfd != -1)
+  fd = v4l2_open (devname, O_RDWR | O_NONBLOCK);
+  if (fd == -1)
+    return SANE_STATUS_INVAL;
+  memset (&cap, 0, sizeof (cap));
+  if (query_capability (fd, &cap) != SANE_STATUS_GOOD)
     {
-      if (v4l1_ioctl (v4lfd, VIDIOCGCAP, &capability) == -1)
-	{
-	  DBG (1,
-	       "attach: ioctl (%d, VIDIOCGCAP,..) failed on `%s': %s\n",
-	       v4lfd, devname, strerror (errno));
-	  v4l1_close (v4lfd);
-	  return SANE_STATUS_INVAL;
-	}
-      if (!(VID_TYPE_CAPTURE & capability.type))
-	{
-	  DBG (1, "attach: device %s can't capture to memory -- exiting\n",
-	       devname);
-	  v4l1_close (v4lfd);
-	  return SANE_STATUS_UNSUPPORTED;
-	}
-      DBG (2, "attach: found videodev `%s' on `%s'\n", capability.name,
-	   devname);
-      v4l1_close (v4lfd);
+      v4l2_close (fd);
+      return SANE_STATUS_UNSUPPORTED;
     }
-  else
+  if (!has_supported_format (fd))
     {
-      DBG (1, "attach: failed to open device `%s': %s\n", devname,
-	   strerror (errno));
-      return SANE_STATUS_INVAL;
+      v4l2_close (fd);
+      return SANE_STATUS_UNSUPPORTED;
     }
+  if (!probe_capture (fd))
+    {
+      v4l2_close (fd);
+      return SANE_STATUS_UNSUPPORTED;
+    }
+  v4l2_close (fd);
 
-  dev = malloc (sizeof (*dev));
+  dev = calloc (1, sizeof (*dev));
   if (!dev)
     return SANE_STATUS_NO_MEM;
-
-  memset (dev, 0, sizeof (*dev));
-
   dev->sane.name = strdup (devname);
-  if (!dev->sane.name)
-    return SANE_STATUS_NO_MEM;
-  dev->sane.vendor = "Noname";
-  dev->sane.model = strdup (capability.name);
-  if (!dev->sane.model)
-    return SANE_STATUS_NO_MEM;
-  dev->sane.type = "virtual device";
-
-  ++num_devices;
+  dev->sane.model = strdup ((const char *) cap.card);
+  if (!dev->sane.name || !dev->sane.model)
+    {
+      free ((void *) dev->sane.name);
+      free ((void *) dev->sane.model);
+      free (dev);
+      return SANE_STATUS_NO_MEM;
+    }
+  dev->sane.vendor = "Video4Linux2";
+  dev->sane.type = "video capture device";
   dev->next = first_dev;
   first_dev = dev;
-
-  if (devp)
-    *devp = dev;
+  num_devices++;
   return SANE_STATUS_GOOD;
 }
 
 static void
-update_parameters (V4L_Scanner * s)
+attach_video_devices (void)
 {
-  /* ??? should be per-device */
-  x_range.min = 0;
-  x_range.max = s->capability.maxwidth - s->capability.minwidth;
-  x_range.quant = 1;
+  char devname[PATH_MAX];
+  int index;
 
-  y_range.min = 0;
-  y_range.max = s->capability.maxheight - s->capability.minheight;
-  y_range.quant = 1;
-
-  odd_x_range.min = s->capability.minwidth;
-  odd_x_range.max = s->capability.maxwidth;
-  if (odd_x_range.max > 767)
+  for (index = 0; index < 64; index++)
     {
-      odd_x_range.max = 767;
-      x_range.max = 767 - s->capability.minwidth;
-    };
-  odd_x_range.quant = 1;
+      snprintf (devname, sizeof (devname), "/dev/video%d", index);
+      attach (devname);
+    }
+}
 
-  odd_y_range.min = s->capability.minheight;
-  odd_y_range.max = s->capability.maxheight;
-  if (odd_y_range.max > 511)
+static void
+set_default_format (V4L_Scanner *s)
+{
+  memset (&s->format, 0, sizeof (s->format));
+  s->format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  if (xioctl (s->fd, VIDIOC_G_FMT, &s->format) == -1)
     {
-      odd_y_range.max = 511;
-      y_range.max = 511 - s->capability.minheight;
-    };
-  odd_y_range.quant = 1;
+      s->format.fmt.pix.width = 640;
+      s->format.fmt.pix.height = 480;
+      s->format.fmt.pix.pixelformat = V4L2_PIX_FMT_GREY;
+      s->format.fmt.pix.field = V4L2_FIELD_ANY;
+    }
+}
 
-  parms.lines = s->window.height;
-  parms.pixels_per_line = s->window.width;
+static void
+add_frame_size (V4L_Scanner *s, __u32 width, __u32 height)
+{
+  unsigned i;
+  unsigned existing_width;
+  unsigned existing_height;
+  if (!width || !height || s->frame_size_count >= MAX_FRAME_SIZES)
+    return;
+  for (i = 0; i < s->frame_size_count; i++)
+    if (sscanf (s->frame_size_list[i], "%ux%u",
+                &existing_width, &existing_height) == 2
+        && existing_width == width && existing_height == height)
+      return;
+  snprintf (s->frame_size_names[s->frame_size_count],
+            sizeof (s->frame_size_names[0]), "%ux%u", width, height);
+  s->frame_size_list[s->frame_size_count]
+    = s->frame_size_names[s->frame_size_count];
+  s->frame_size_count++;
+}
 
-  switch (s->pict.palette)
+static void
+query_frame_sizes (V4L_Scanner *s)
+{
+  struct v4l2_fmtdesc format;
+  struct v4l2_frmsizeenum size;
+  unsigned format_index;
+  unsigned size_index;
+
+  s->frame_size_count = 0;
+  for (format_index = 0; format_index < 256; format_index++)
     {
-    case VIDEO_PALETTE_GREY:	/* Linear greyscale */
-      {
-	parms.format = SANE_FRAME_GRAY;
-	parms.depth = 8;
-	parms.bytes_per_line = s->window.width;
-	break;
-      }
-    case VIDEO_PALETTE_RGB24:	/* 24bit RGB */
-      {
-	parms.format = SANE_FRAME_RGB;
-	parms.depth = 8;
-	parms.bytes_per_line = s->window.width * 3;
-	break;
-      }
-    default:
-      {
-	parms.format = SANE_FRAME_GRAY;
-	parms.bytes_per_line = s->window.width;
-	break;
-      }
+      memset (&format, 0, sizeof (format));
+      format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      format.index = format_index;
+      if (xioctl (s->fd, VIDIOC_ENUM_FMT, &format) == -1)
+        break;
+      if (format.pixelformat != V4L2_PIX_FMT_MJPEG
+          && format.pixelformat != V4L2_PIX_FMT_YUYV
+          && format.pixelformat != V4L2_PIX_FMT_RGB24
+          && format.pixelformat != V4L2_PIX_FMT_GREY)
+        continue;
+      for (size_index = 0; size_index < 256; size_index++)
+        {
+          memset (&size, 0, sizeof (size));
+          size.index = size_index;
+          size.pixel_format = format.pixelformat;
+          if (xioctl (s->fd, VIDIOC_ENUM_FRAMESIZES, &size) == -1)
+            break;
+          if (size.type == V4L2_FRMSIZE_TYPE_DISCRETE)
+            add_frame_size (s, size.discrete.width, size.discrete.height);
+          else if (size.type == V4L2_FRMSIZE_TYPE_STEPWISE
+                   || size.type == V4L2_FRMSIZE_TYPE_CONTINUOUS)
+            {
+              add_frame_size (s, size.stepwise.min_width,
+                              size.stepwise.min_height);
+              add_frame_size (s, size.stepwise.max_width,
+                              size.stepwise.max_height);
+              break;
+            }
+        }
+    }
+  if (s->frame_size_count == 0)
+    add_frame_size (s, s->format.fmt.pix.width, s->format.fmt.pix.height);
+  s->frame_size_list[s->frame_size_count] = NULL;
+  s->frame_width = s->format.fmt.pix.width;
+  s->frame_height = s->format.fmt.pix.height;
+  if (s->frame_size_count > 0)
+    {
+      s->frame_width = 0;
+      s->frame_height = 0;
+      sscanf (s->frame_size_list[0], "%ux%u",
+              &s->frame_width, &s->frame_height);
+    }
+}
+
+static SANE_Bool
+gray_fallback_as_rgb (const V4L_Scanner *s)
+{
+  return s->gray_mode
+    && s->format.fmt.pix.pixelformat == V4L2_PIX_FMT_RGB24;
+}
+
+static SANE_Status
+update_parameters (V4L_Scanner *s)
+{
+  SANE_Word width;
+  SANE_Word height;
+  if (s->frame_width == 0 || s->frame_height == 0
+      || s->frame_width > INT_MAX || s->frame_height > INT_MAX)
+    return SANE_STATUS_INVAL;
+  if (s->val[OPT_TL_X].w > s->val[OPT_BR_X].w
+      || s->val[OPT_TL_Y].w > s->val[OPT_BR_Y].w)
+    return SANE_STATUS_INVAL;
+  width = SANE_UNFIX (s->val[OPT_BR_X].w - s->val[OPT_TL_X].w);
+  height = SANE_UNFIX (s->val[OPT_BR_Y].w - s->val[OPT_TL_Y].w);
+  if (width <= 0 || height <= 0)
+    return SANE_STATUS_INVAL;
+  s->params.format = gray_fallback_as_rgb (s)
+    ? SANE_FRAME_RGB : (s->gray_mode ? SANE_FRAME_GRAY : SANE_FRAME_RGB);
+  s->params.last_frame = SANE_TRUE;
+  s->params.pixels_per_line = width;
+  s->params.lines = height;
+  s->params.bytes_per_line = s->params.pixels_per_line
+    * ((s->params.format == SANE_FRAME_GRAY) ? 1 : 3);
+  s->params.depth = 8;
+  return SANE_STATUS_GOOD;
+}
+
+static int
+query_control (const V4L_Scanner *s, unsigned id, SANE_Word *value)
+{
+  struct v4l2_queryctrl query;
+  struct v4l2_control control;
+  memset (&query, 0, sizeof (query));
+  query.id = id;
+  if (xioctl (s->fd, VIDIOC_QUERYCTRL, &query) == -1
+      || (query.flags & V4L2_CTRL_FLAG_DISABLED))
+    return -1;
+  memset (&control, 0, sizeof (control));
+  control.id = id;
+  if (xioctl (s->fd, VIDIOC_G_CTRL, &control) == -1)
+    return -1;
+  *value = query.maximum == query.minimum ? 0
+    : (control.value - query.minimum) * 255
+      / (query.maximum - query.minimum);
+  return 0;
+}
+
+static void
+query_control_option (V4L_Scanner *s, int option, unsigned id)
+{
+  if (query_control (s, id, &s->val[option].w) != 0)
+    {
+      s->opt[option].cap |= SANE_CAP_INACTIVE;
+      DBG (4, "control option %s is unavailable (V4L2 id=0x%x)\n",
+           s->opt[option].name, id);
     }
 }
 
 static SANE_Status
-init_options (V4L_Scanner * s)
+set_control (const V4L_Scanner *s, unsigned id, SANE_Word value)
+{
+  struct v4l2_queryctrl query;
+  struct v4l2_control control;
+  memset (&query, 0, sizeof (query));
+  query.id = id;
+  if (xioctl (s->fd, VIDIOC_QUERYCTRL, &query) == -1
+      || (query.flags & V4L2_CTRL_FLAG_DISABLED))
+    return SANE_STATUS_UNSUPPORTED;
+  memset (&control, 0, sizeof (control));
+  control.id = id;
+  control.value = query.minimum
+    + value * (query.maximum - query.minimum) / 255;
+  return xioctl (s->fd, VIDIOC_S_CTRL, &control) == -1
+    ? SANE_STATUS_INVAL : SANE_STATUS_GOOD;
+}
+
+static SANE_Status
+init_options (V4L_Scanner *s)
 {
   int i;
-
   memset (s->opt, 0, sizeof (s->opt));
   memset (s->val, 0, sizeof (s->val));
-
-  for (i = 0; i < NUM_OPTIONS; ++i)
+  for (i = 0; i < NUM_OPTIONS; i++)
     {
       s->opt[i].size = sizeof (SANE_Word);
-      s->opt[i].cap = (SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT);
+      s->opt[i].cap = SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT;
     }
 
-  /* Number of options */
-  s->opt[OPT_NUM_OPTS].title = SANE_TITLE_NUM_OPTIONS;
-  s->opt[OPT_NUM_OPTS].desc = SANE_DESC_NUM_OPTIONS;
-  s->opt[OPT_NUM_OPTS].type = SANE_TYPE_INT;
-  s->opt[OPT_NUM_OPTS].cap = SANE_CAP_SOFT_DETECT;
+  s->opt[OPT_NUM_OPTS] = (SANE_Option_Descriptor) {
+    SANE_NAME_NUM_OPTIONS, SANE_TITLE_NUM_OPTIONS, SANE_DESC_NUM_OPTIONS,
+    SANE_TYPE_INT, SANE_UNIT_NONE, sizeof (SANE_Word), SANE_CAP_SOFT_DETECT,
+    SANE_CONSTRAINT_NONE, { 0 }
+  };
   s->val[OPT_NUM_OPTS].w = NUM_OPTIONS;
-
-  /* "Mode" group: */
-  s->opt[OPT_MODE_GROUP].title = "Scan Mode";
-  s->opt[OPT_MODE_GROUP].desc = "";
-  s->opt[OPT_MODE_GROUP].type = SANE_TYPE_GROUP;
-  s->opt[OPT_MODE_GROUP].cap = 0;
-  s->opt[OPT_MODE_GROUP].constraint_type = SANE_CONSTRAINT_NONE;
-
-  /* mode */
-  s->opt[OPT_MODE].name = SANE_NAME_SCAN_MODE;
-  s->opt[OPT_MODE].title = SANE_TITLE_SCAN_MODE;
-  s->opt[OPT_MODE].desc = SANE_DESC_SCAN_MODE;
-  s->opt[OPT_MODE].type = SANE_TYPE_STRING;
-  s->opt[OPT_MODE].unit = SANE_UNIT_NONE;
-  s->opt[OPT_MODE].constraint_type = SANE_CONSTRAINT_STRING_LIST;
-  s->opt[OPT_MODE].constraint.string_list = mode_list;
-  s->val[OPT_MODE].s = strdup (mode_list[0]);
+  s->opt[OPT_MODE_GROUP] = (SANE_Option_Descriptor) {
+    "mode-group", "Scan Mode", "", SANE_TYPE_GROUP, SANE_UNIT_NONE,
+    0, 0, SANE_CONSTRAINT_NONE, { 0 }
+  };
+  s->opt[OPT_MODE] = (SANE_Option_Descriptor) {
+    SANE_NAME_SCAN_MODE, SANE_TITLE_SCAN_MODE, SANE_DESC_SCAN_MODE,
+    SANE_TYPE_STRING, SANE_UNIT_NONE, 6,
+    SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT,
+    SANE_CONSTRAINT_STRING_LIST, { .string_list = mode_list }
+  };
+  s->val[OPT_MODE].s = strdup (SANE_VALUE_SCAN_MODE_GRAY);
   if (!s->val[OPT_MODE].s)
     return SANE_STATUS_NO_MEM;
-  s->opt[OPT_MODE].size = 1; /* '\0' */
-  for (i = 0; mode_list[i] != 0; ++i)
-    {
-      int len = strlen(mode_list[i]) + 1;
-      if (s->opt[OPT_MODE].size < len)
-        s->opt[OPT_MODE].size = len;
-    }
 
-  /* channel */
-  s->opt[OPT_CHANNEL].name = "channel";
-  s->opt[OPT_CHANNEL].title = "Channel";
-  s->opt[OPT_CHANNEL].desc =
-    "Selects the channel of the v4l device (e.g. television " "or video-in.";
-  s->opt[OPT_CHANNEL].type = SANE_TYPE_STRING;
-  s->opt[OPT_CHANNEL].unit = SANE_UNIT_NONE;
-  s->opt[OPT_CHANNEL].constraint_type = SANE_CONSTRAINT_STRING_LIST;
-  s->opt[OPT_CHANNEL].constraint.string_list = s->channel;
-  s->val[OPT_CHANNEL].s = strdup (s->channel[0]);
-  if (!s->val[OPT_CHANNEL].s)
-    return SANE_STATUS_NO_MEM;
-  if (s->channel[0] == 0 || s->channel[1] == 0)
+  s->opt[OPT_CHANNEL] = (SANE_Option_Descriptor) {
+    "channel", "Channel", "Selects the V4L2 input channel",
+    SANE_TYPE_STRING, SANE_UNIT_NONE,
+    sizeof (((struct v4l2_input *) 0)->name),
+    SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT,
+    SANE_CONSTRAINT_STRING_LIST, { .string_list = s->channel }
+  };
+  if (s->channel[0])
+    {
+      s->val[OPT_CHANNEL].s = strdup (s->channel[0]);
+      if (!s->val[OPT_CHANNEL].s)
+        return SANE_STATUS_NO_MEM;
+    }
+  else
     s->opt[OPT_CHANNEL].cap |= SANE_CAP_INACTIVE;
-  s->opt[OPT_CHANNEL].size = 1; /* '\0' */
-  for (i = 0; s->channel[i] != 0; ++i)
-    {
-      int len = strlen(s->channel[i]) + 1;
-      if (s->opt[OPT_CHANNEL].size < len)
-        s->opt[OPT_CHANNEL].size = len;
-    }
 
-  /* "Geometry" group: */
-  s->opt[OPT_GEOMETRY_GROUP].title = "Geometry";
-  s->opt[OPT_GEOMETRY_GROUP].desc = "";
-  s->opt[OPT_GEOMETRY_GROUP].type = SANE_TYPE_GROUP;
-  s->opt[OPT_GEOMETRY_GROUP].cap = SANE_CAP_ADVANCED;
-  s->opt[OPT_GEOMETRY_GROUP].constraint_type = SANE_CONSTRAINT_NONE;
+  s->opt[OPT_FRAME_SIZE] = (SANE_Option_Descriptor) {
+    "frame-size", "Frame size", "Selects the V4L2 capture dimensions",
+    SANE_TYPE_STRING, SANE_UNIT_NONE, sizeof (s->frame_size_names[0]),
+    SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT,
+    SANE_CONSTRAINT_STRING_LIST, { .string_list = s->frame_size_list }
+  };
+  s->val[OPT_FRAME_SIZE].s = strdup (s->frame_size_list[0]);
+  if (!s->val[OPT_FRAME_SIZE].s)
+    return SANE_STATUS_NO_MEM;
 
-/* top-left x *//* ??? first check if window is settable at all */
-  s->opt[OPT_TL_X].name = SANE_NAME_SCAN_TL_X;
-  s->opt[OPT_TL_X].title = SANE_TITLE_SCAN_TL_X;
-  s->opt[OPT_TL_X].desc = SANE_DESC_SCAN_TL_X;
-  s->opt[OPT_TL_X].type = SANE_TYPE_INT;
-  s->opt[OPT_TL_X].unit = SANE_UNIT_PIXEL;
-  s->opt[OPT_TL_X].cap |= SANE_CAP_INACTIVE;
-  s->opt[OPT_TL_X].constraint_type = SANE_CONSTRAINT_RANGE;
-  s->opt[OPT_TL_X].constraint.range = &x_range;
-  s->val[OPT_TL_X].w = 0;
-
-  /* top-left y */
+  s->opt[OPT_GEOMETRY_GROUP] = (SANE_Option_Descriptor) {
+    "geometry-group", "Geometry", "", SANE_TYPE_GROUP, SANE_UNIT_NONE,
+    0, SANE_CAP_ADVANCED, SANE_CONSTRAINT_NONE, { 0 }
+  };
+  s->geometry_range[0] = (SANE_Range) { 0, SANE_FIX (s->frame_width - 1), SANE_FIX (1) };
+  s->geometry_range[1] = (SANE_Range) { 0, SANE_FIX (s->frame_height - 1), SANE_FIX (1) };
+  s->geometry_range[2] = (SANE_Range) { 1, SANE_FIX (s->frame_width), SANE_FIX (1) };
+  s->geometry_range[3] = (SANE_Range) { 1, SANE_FIX (s->frame_height), SANE_FIX (1) };
+  s->opt[OPT_TL_X] = (SANE_Option_Descriptor) {
+    SANE_NAME_SCAN_TL_X, "Top-left X", "Left edge in pixels",
+    SANE_TYPE_INT, SANE_UNIT_PIXEL, sizeof (SANE_Word),
+    SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT, SANE_CONSTRAINT_RANGE,
+    { .range = &s->geometry_range[0] }
+  };
+  s->opt[OPT_TL_Y] = s->opt[OPT_TL_X];
   s->opt[OPT_TL_Y].name = SANE_NAME_SCAN_TL_Y;
-  s->opt[OPT_TL_Y].title = SANE_TITLE_SCAN_TL_Y;
-  s->opt[OPT_TL_Y].desc = SANE_DESC_SCAN_TL_Y;
-  s->opt[OPT_TL_Y].type = SANE_TYPE_INT;
-  s->opt[OPT_TL_Y].unit = SANE_UNIT_PIXEL;
-  s->opt[OPT_TL_Y].cap |= SANE_CAP_INACTIVE;
-  s->opt[OPT_TL_Y].constraint_type = SANE_CONSTRAINT_RANGE;
-  s->opt[OPT_TL_Y].constraint.range = &y_range;
-  s->val[OPT_TL_Y].w = 0;
-
-  /* bottom-right x */
+  s->opt[OPT_TL_Y].title = "Top-left Y";
+  s->opt[OPT_TL_Y].desc = "Top edge in pixels";
+  s->opt[OPT_TL_Y].constraint.range = &s->geometry_range[1];
+  s->opt[OPT_BR_X] = s->opt[OPT_TL_X];
   s->opt[OPT_BR_X].name = SANE_NAME_SCAN_BR_X;
-  s->opt[OPT_BR_X].title = SANE_TITLE_SCAN_BR_X;
-  s->opt[OPT_BR_X].desc = SANE_DESC_SCAN_BR_X;
-  s->opt[OPT_BR_X].type = SANE_TYPE_INT;
-  s->opt[OPT_BR_X].unit = SANE_UNIT_PIXEL;
-  s->opt[OPT_BR_X].cap |= SANE_CAP_INACTIVE;
-  s->opt[OPT_BR_X].constraint_type = SANE_CONSTRAINT_RANGE;
-  s->opt[OPT_BR_X].constraint.range = &odd_x_range;
-  s->val[OPT_BR_X].w = s->capability.maxwidth;
-  if (s->val[OPT_BR_X].w > 767)
-    s->val[OPT_BR_X].w = 767;
-
-  /* bottom-right y */
+  s->opt[OPT_BR_X].title = "Bottom-right X";
+  s->opt[OPT_BR_X].desc = "Right edge in pixels";
+  s->opt[OPT_BR_X].constraint.range = &s->geometry_range[2];
+  s->opt[OPT_BR_Y] = s->opt[OPT_TL_X];
   s->opt[OPT_BR_Y].name = SANE_NAME_SCAN_BR_Y;
-  s->opt[OPT_BR_Y].title = SANE_TITLE_SCAN_BR_Y;
-  s->opt[OPT_BR_Y].desc = SANE_DESC_SCAN_BR_Y;
-  s->opt[OPT_BR_Y].type = SANE_TYPE_INT;
-  s->opt[OPT_BR_Y].unit = SANE_UNIT_PIXEL;
-  s->opt[OPT_BR_Y].cap |= SANE_CAP_INACTIVE;
-  s->opt[OPT_BR_Y].constraint_type = SANE_CONSTRAINT_RANGE;
-  s->opt[OPT_BR_Y].constraint.range = &odd_y_range;
-  s->val[OPT_BR_Y].w = s->capability.maxheight;
-  if (s->val[OPT_BR_Y].w > 511)
-    s->val[OPT_BR_Y].w = 511;
-
-  /* "Enhancement" group: */
-  s->opt[OPT_ENHANCEMENT_GROUP].title = "Enhancement";
-  s->opt[OPT_ENHANCEMENT_GROUP].desc = "";
-  s->opt[OPT_ENHANCEMENT_GROUP].type = SANE_TYPE_GROUP;
-  s->opt[OPT_ENHANCEMENT_GROUP].cap = 0;
-  s->opt[OPT_ENHANCEMENT_GROUP].constraint_type = SANE_CONSTRAINT_NONE;
-
-  /* brightness */
-  s->opt[OPT_BRIGHTNESS].name = SANE_NAME_BRIGHTNESS;
-  s->opt[OPT_BRIGHTNESS].title = SANE_TITLE_BRIGHTNESS;
-  s->opt[OPT_BRIGHTNESS].desc = SANE_DESC_BRIGHTNESS;
-  s->opt[OPT_BRIGHTNESS].type = SANE_TYPE_INT;
-  s->opt[OPT_BRIGHTNESS].constraint_type = SANE_CONSTRAINT_RANGE;
-  s->opt[OPT_BRIGHTNESS].constraint.range = &u8_range;
-  s->val[OPT_BRIGHTNESS].w = s->pict.brightness / 256;
-
-  /* hue */
+  s->opt[OPT_BR_Y].title = "Bottom-right Y";
+  s->opt[OPT_BR_Y].desc = "Bottom edge in pixels";
+  s->opt[OPT_BR_Y].constraint.range = &s->geometry_range[3];
+  s->val[OPT_BR_X].w = SANE_FIX (s->frame_width);
+  s->val[OPT_BR_Y].w = SANE_FIX (s->frame_height);
+  s->opt[OPT_ENHANCEMENT_GROUP] = (SANE_Option_Descriptor) {
+    "enhancement-group", "Enhancement", "", SANE_TYPE_GROUP,
+    SANE_UNIT_NONE, 0, 0, SANE_CONSTRAINT_NONE, { 0 }
+  };
+  s->opt[OPT_BRIGHTNESS] = (SANE_Option_Descriptor) {
+    SANE_NAME_BRIGHTNESS, SANE_TITLE_BRIGHTNESS, SANE_DESC_BRIGHTNESS,
+    SANE_TYPE_INT, SANE_UNIT_NONE, sizeof (SANE_Word),
+    SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT, SANE_CONSTRAINT_RANGE,
+    { .range = &u8_range }
+  };
+  s->opt[OPT_HUE] = s->opt[OPT_BRIGHTNESS];
   s->opt[OPT_HUE].name = SANE_NAME_HUE;
   s->opt[OPT_HUE].title = SANE_TITLE_HUE;
   s->opt[OPT_HUE].desc = SANE_DESC_HUE;
-  s->opt[OPT_HUE].type = SANE_TYPE_INT;
-  s->opt[OPT_HUE].constraint_type = SANE_CONSTRAINT_RANGE;
-  s->opt[OPT_HUE].constraint.range = &u8_range;
-  s->val[OPT_HUE].w = s->pict.hue / 256;
-
-  /* colour */
+  s->opt[OPT_COLOR] = s->opt[OPT_BRIGHTNESS];
   s->opt[OPT_COLOR].name = "color";
-  s->opt[OPT_COLOR].title = "Picture color";
-  s->opt[OPT_COLOR].desc = "Sets the picture's color.";
-  s->opt[OPT_COLOR].type = SANE_TYPE_INT;
-  s->opt[OPT_COLOR].constraint_type = SANE_CONSTRAINT_RANGE;
-  s->opt[OPT_COLOR].constraint.range = &u8_range;
-  s->val[OPT_COLOR].w = s->pict.colour / 256;
-
-  /* contrast */
+  s->opt[OPT_COLOR].title = SANE_I18N ("Picture color");
+  s->opt[OPT_COLOR].desc = SANE_I18N ("Sets the picture's color.");
+  s->opt[OPT_CONTRAST] = s->opt[OPT_BRIGHTNESS];
   s->opt[OPT_CONTRAST].name = SANE_NAME_CONTRAST;
   s->opt[OPT_CONTRAST].title = SANE_TITLE_CONTRAST;
   s->opt[OPT_CONTRAST].desc = SANE_DESC_CONTRAST;
-  s->opt[OPT_CONTRAST].type = SANE_TYPE_INT;
-  s->opt[OPT_CONTRAST].constraint_type = SANE_CONSTRAINT_RANGE;
-  s->opt[OPT_CONTRAST].constraint.range = &u8_range;
-  s->val[OPT_CONTRAST].w = s->pict.contrast / 256;
-
-  /* whiteness */
+  s->opt[OPT_WHITE_LEVEL] = s->opt[OPT_BRIGHTNESS];
   s->opt[OPT_WHITE_LEVEL].name = SANE_NAME_WHITE_LEVEL;
   s->opt[OPT_WHITE_LEVEL].title = SANE_TITLE_WHITE_LEVEL;
   s->opt[OPT_WHITE_LEVEL].desc = SANE_DESC_WHITE_LEVEL;
-  s->opt[OPT_WHITE_LEVEL].type = SANE_TYPE_INT;
-  s->opt[OPT_WHITE_LEVEL].constraint_type = SANE_CONSTRAINT_RANGE;
-  s->opt[OPT_WHITE_LEVEL].constraint.range = &u8_range;
-  s->val[OPT_WHITE_LEVEL].w = s->pict.whiteness / 256;
+  query_control_option (s, OPT_BRIGHTNESS, V4L2_CID_BRIGHTNESS);
+  query_control_option (s, OPT_HUE, V4L2_CID_HUE);
+  query_control_option (s, OPT_COLOR, V4L2_CID_SATURATION);
+  query_control_option (s, OPT_CONTRAST, V4L2_CID_CONTRAST);
+  query_control_option (s, OPT_WHITE_LEVEL, V4L2_CID_WHITENESS);
+  return SANE_STATUS_GOOD;
+}
 
+static void
+cleanup_capture (V4L_Scanner *s)
+{
+  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  if (s->streaming)
+    {
+      xioctl (s->fd, VIDIOC_STREAMOFF, &type);
+      s->streaming = SANE_FALSE;
+    }
+  if (s->buffer && s->is_mmap)
+    v4l2_munmap (s->buffer, s->buffer_size);
+  else if (s->buffer)
+    free (s->buffer);
+  s->buffer = NULL;
+  s->buffer_size = 0;
+  s->frame_size = 0;
+  s->offset = 0;
+  s->scanning = SANE_FALSE;
+}
+
+static SANE_Status
+convert_rgb_to_gray (V4L_Scanner *s)
+{
+  size_t width = s->format.fmt.pix.width;
+  size_t height = s->format.fmt.pix.height;
+  size_t stride;
+  size_t rows;
+  unsigned char *data;
+
+  size_t pixels;
+
+  if (!gray_fallback_as_rgb (s))
+    {
+      DBG (4, "conversion: no RGB-to-gray fallback required\n");
+      return SANE_STATUS_GOOD;
+    }
+  DBG (4, "conversion: RGB24 to grayscale-compatible RGB output, "
+       "width=%zu height=%zu stride=%zu\n", width, height,
+       MAX (s->format.fmt.pix.bytesperline, width * 3));
+  if (width == 0 || height == 0 || width > SIZE_MAX / 3)
+    {
+      s->frame_size = 0;
+      return SANE_STATUS_INVAL;
+    }
+  stride = MAX (s->format.fmt.pix.bytesperline, width * 3);
+  if (stride > SIZE_MAX / height
+      || stride * height > s->frame_size
+      || width > SIZE_MAX / height
+      || width * height > SIZE_MAX / 3
+      || width * height * 3 > s->buffer_size)
+    {
+      s->frame_size = 0;
+      return SANE_STATUS_IO_ERROR;
+    }
+  rows = height;
+  data = s->buffer;
+  for (size_t row = 0; row < rows; row++)
+    for (size_t column = 0; column < width; column++)
+      {
+        size_t source = row * stride + column * 3;
+        size_t destination = (row * width + column) * 3;
+        unsigned char gray = (unsigned char) ((77 * data[source]
+                                               + 150 * data[source + 1]
+                                               + 29 * data[source + 2]) >> 8);
+        data[destination] = gray;
+        data[destination + 1] = gray;
+        data[destination + 2] = gray;
+      }
+  pixels = rows * width * 3;
+  s->frame_size = pixels;
+  return SANE_STATUS_GOOD;
+}
+
+static SANE_Status
+crop_frame (V4L_Scanner *s)
+{
+  size_t source_width = s->format.fmt.pix.width;
+  size_t source_height = s->format.fmt.pix.height;
+  size_t left = (size_t) SANE_UNFIX (s->val[OPT_TL_X].w);
+  size_t top = (size_t) SANE_UNFIX (s->val[OPT_TL_Y].w);
+  size_t width = (size_t) SANE_UNFIX
+    (s->val[OPT_BR_X].w - s->val[OPT_TL_X].w);
+  size_t height = (size_t) SANE_UNFIX
+    (s->val[OPT_BR_Y].w - s->val[OPT_TL_Y].w);
+  size_t bytes_per_pixel = s->params.format == SANE_FRAME_GRAY ? 1 : 3;
+  size_t source_stride;
+  size_t row;
+
+  DBG (4, "crop: input=%zux%zu, area=%zu,%zu %zux%zu, bytes_per_pixel=%zu\n",
+       source_width, source_height, left, top, width, height,
+       bytes_per_pixel);
+
+  if (source_width > SIZE_MAX / bytes_per_pixel)
+    {
+      s->frame_size = 0;
+      return SANE_STATUS_INVAL;
+    }
+  source_stride = source_width * bytes_per_pixel;
+  if (left >= source_width || top >= source_height || width == 0 || height == 0
+      || left + width > source_width || top + height > source_height
+      || source_stride > SIZE_MAX / source_height
+      || source_stride * source_height > s->buffer_size
+      || width > SIZE_MAX / height
+      || width * height > SIZE_MAX / bytes_per_pixel)
+    {
+      s->frame_size = 0;
+      return SANE_STATUS_INVAL;
+    }
+  for (row = 0; row < height; row++)
+    memmove ((unsigned char *) s->buffer + row * width * bytes_per_pixel,
+             (unsigned char *) s->buffer
+               + (top + row) * source_stride + left * bytes_per_pixel,
+             width * bytes_per_pixel);
+  s->frame_size = width * height * bytes_per_pixel;
+  return SANE_STATUS_GOOD;
+}
+
+static SANE_Status
+start_capture (V4L_Scanner *s)
+{
+  struct v4l2_requestbuffers req;
+  struct v4l2_buffer buf;
+  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  size_t size;
+  ssize_t result;
+  SANE_Status status;
+
+  cleanup_capture (s);
+  debug_format (4, "capture requested format", &s->format.fmt.pix);
+
+  /* libv4l2 can emulate read() for streaming-only devices and convert
+     formats such as MJPEG and YUYV to the RGB24 or GREY format requested by
+     sane_start().  Prefer this path so that the conversion layer is not
+     bypassed by direct mmap access. */
+  size = MAX((size_t) s->format.fmt.pix.width * s->format.fmt.pix.height * 3,
+             MAX((size_t) s->format.fmt.pix.bytesperline * s->format.fmt.pix.height,
+                 s->format.fmt.pix.sizeimage));
+  s->buffer = malloc (size);
+  if (!s->buffer)
+    return SANE_STATUS_NO_MEM;
+  s->buffer_size = size;
+  s->is_mmap = SANE_FALSE;
+  /* libv4l2 may implement read() using an internal streaming queue.  Mark
+     the capture active before calling it so cleanup_capture() releases that
+     queue when the next scan starts or the handle is cancelled. */
+  s->streaming = SANE_TRUE;
+  result = read_frame (s->fd, s->buffer, size, V4L_CAPTURE_TIMEOUT_MS);
+  DBG (4, "capture read path: result=%zd, buffer_size=%zu\n", result, size);
+  if (result > 0)
+    {
+      s->frame_size = (size_t) result;
+      status = convert_rgb_to_gray (s);
+      if (status != SANE_STATUS_GOOD)
+        {
+          cleanup_capture (s);
+          return status;
+        }
+      if (crop_frame (s) != SANE_STATUS_GOOD)
+        {
+          cleanup_capture (s);
+          return SANE_STATUS_INVAL;
+        }
+      s->scanning = SANE_TRUE;
+      return SANE_STATUS_GOOD;
+    }
+  cleanup_capture (s);
+  DBG (3, "capture read path unavailable; trying mmap fallback\n");
+
+  /* Some libv4l2/device combinations expose streaming but do not provide
+     the read emulation.  Keep a direct mmap fallback for those devices. */
+  if (s->format_converted)
+    {
+      DBG (3, "capture read path unavailable; negotiated format requires "
+           "libv4l2 conversion, mmap fallback is not safe\n");
+      return SANE_STATUS_UNSUPPORTED;
+    }
+  memset (&req, 0, sizeof (req));
+  req.count = 1;
+  req.type = type;
+  req.memory = V4L2_MEMORY_MMAP;
+  if (xioctl (s->fd, VIDIOC_REQBUFS, &req) == -1 || req.count < 1)
+    {
+      return SANE_STATUS_IO_ERROR;
+    }
+  memset (&buf, 0, sizeof (buf));
+  buf.type = type;
+  buf.memory = V4L2_MEMORY_MMAP;
+  buf.index = 0;
+  if (xioctl (s->fd, VIDIOC_QUERYBUF, &buf) == -1)
+    return SANE_STATUS_IO_ERROR;
+  s->buffer_size = buf.length;
+  s->buffer = v4l2_mmap (NULL, buf.length, PROT_READ | PROT_WRITE,
+                         MAP_SHARED, s->fd, buf.m.offset);
+  if (s->buffer == MAP_FAILED)
+    {
+      s->buffer = NULL;
+      return SANE_STATUS_IO_ERROR;
+    }
+  s->is_mmap = SANE_TRUE;
+  if (xioctl (s->fd, VIDIOC_QBUF, &buf) == -1
+      || xioctl (s->fd, VIDIOC_STREAMON, &type) == -1)
+    {
+      cleanup_capture (s);
+      return SANE_STATUS_IO_ERROR;
+    }
+  s->streaming = SANE_TRUE;
+  if (dequeue_frame (s->fd, &buf, V4L_CAPTURE_TIMEOUT_MS)
+      != SANE_STATUS_GOOD)
+    {
+      cleanup_capture (s);
+      return SANE_STATUS_IO_ERROR;
+    }
+  s->frame_size = MIN(buf.bytesused, s->buffer_size);
+  DBG (4, "capture mmap path: bytesused=%u, buffer_size=%zu\n",
+       buf.bytesused, s->buffer_size);
+  status = convert_rgb_to_gray (s);
+  if (status != SANE_STATUS_GOOD)
+    {
+      cleanup_capture (s);
+      return status;
+    }
+  if (crop_frame (s) != SANE_STATUS_GOOD)
+    {
+      cleanup_capture (s);
+      return SANE_STATUS_INVAL;
+    }
+  s->scanning = SANE_TRUE;
   return SANE_STATUS_GOOD;
 }
 
 SANE_Status
-sane_init (SANE_Int * version_code, SANE_Auth_Callback authorize)
+sane_init (SANE_Int *version_code, SANE_Auth_Callback authorize)
 {
-  char dev_name[PATH_MAX], *str;
-  size_t len;
+  char line[PATH_MAX];
   FILE *fp;
-
-  (void) authorize;		/* stop gcc from complaining */
+  char *end;
+  (void) authorize;
   DBG_INIT ();
-
-  DBG (2, "SANE v4l backend version %d.%d build %d from %s\n", SANE_CURRENT_MAJOR,
-       SANE_CURRENT_MINOR, BUILD, PACKAGE_STRING);
-
+  DBG (3, "sane_init\n");
   if (version_code)
     *version_code = SANE_VERSION_CODE (SANE_CURRENT_MAJOR, SANE_CURRENT_MINOR, BUILD);
-
+  attach_video_devices ();
   fp = sanei_config_open (V4L_CONFIG_FILE);
   if (!fp)
+    return SANE_STATUS_GOOD;
+  while (sanei_config_read (line, sizeof (line), fp))
     {
-      DBG (2,
-	   "sane_init: file `%s' not accessible (%s), trying /dev/video0\n",
-	   V4L_CONFIG_FILE, strerror (errno));
-
-      return attach ("/dev/video0", 0);
-    }
-
-  while (sanei_config_read (dev_name, sizeof (dev_name), fp))
-    {
-      if (dev_name[0] == '#')	/* ignore line comments */
-	continue;
-      len = strlen (dev_name);
-
-      if (!len)
-	continue;		/* ignore empty lines */
-
-      /* Remove trailing space and trailing comments */
-      for (str = dev_name; *str && !isspace (*str) && *str != '#'; ++str);
-      attach (dev_name, 0);
+      if (line[0] == '#')
+        continue;
+      end = line;
+      while (*end && *end != '#' && *end != ' ' && *end != '\t')
+        end++;
+      *end = '\0';
+      if (*line)
+        attach (line);
     }
   fclose (fp);
   return SANE_STATUS_GOOD;
@@ -474,7 +935,10 @@ void
 sane_exit (void)
 {
   V4L_Device *dev, *next;
-
+  while (first_handle)
+    sane_close (first_handle);
+  free (devlist);
+  devlist = NULL;
   for (dev = first_dev; dev; dev = next)
     {
       next = dev->next;
@@ -482,661 +946,366 @@ sane_exit (void)
       free ((void *) dev->sane.model);
       free (dev);
     }
-
-  if (NULL != devlist)
-    {
-      free (devlist);
-      devlist = NULL;
-    }
-  DBG (5, "sane_exit: all devices freed\n");
+  first_dev = NULL;
+  num_devices = 0;
 }
 
 SANE_Status
-sane_get_devices (const SANE_Device *** device_list, SANE_Bool __sane_unused__ local_only)
+sane_get_devices (const SANE_Device ***device_list, SANE_Bool local_only)
 {
   V4L_Device *dev;
-  int i;
-
-  DBG (5, "sane_get_devices\n");
-
-  if (devlist)
-    free (devlist);
-
-  devlist = malloc ((num_devices + 1) * sizeof (devlist[0]));
+  int i = 0;
+  (void) local_only;
+  if (!device_list)
+    return SANE_STATUS_INVAL;
+  free (devlist);
+  devlist = calloc ((size_t) num_devices + 1, sizeof (*devlist));
   if (!devlist)
     return SANE_STATUS_NO_MEM;
-
-  i = 0;
-  for (dev = first_dev; i < num_devices; dev = dev->next)
+  for (dev = first_dev; dev; dev = dev->next)
     devlist[i++] = &dev->sane;
-  devlist[i++] = 0;
-
   *device_list = devlist;
   return SANE_STATUS_GOOD;
 }
 
 SANE_Status
-sane_open (SANE_String_Const devname, SANE_Handle * handle)
+sane_open (SANE_String_Const devname, SANE_Handle *handle)
 {
   V4L_Device *dev;
   V4L_Scanner *s;
-  static int v4lfd;
-  int i;
-  struct video_channel channel;
-  SANE_Status status;
-  int max_channels = MAX_CHANNELS;
+  struct v4l2_input input;
+  int fd, i;
+  SANE_Status status = SANE_STATUS_GOOD;
 
-  if (!devname)
-    {
-      DBG (1, "sane_open: devname == 0\n");
-      return SANE_STATUS_INVAL;
-    }
-
+  if (!devname || !handle)
+    return SANE_STATUS_INVAL;
   for (dev = first_dev; dev; dev = dev->next)
     if (strcmp (dev->sane.name, devname) == 0)
-      {
-	DBG (5, "sane_open: device %s found in devlist\n", devname);
-	break;
-      }
-  if (!devname[0])
-    dev = first_dev;
+      break;
   if (!dev)
-    {
-      DBG (1, "sane_open: device %s doesn't seem to be a v4l "
-	   "device\n", devname);
-      return SANE_STATUS_INVAL;
-    }
-
-  v4lfd = v4l1_open (devname, O_RDWR);
-  if (v4lfd == -1)
-    {
-      DBG (1, "sane_open: can't open %s (%s)\n", devname, strerror (errno));
-      return SANE_STATUS_INVAL;
-    }
-  s = malloc (sizeof (*s));
+    return SANE_STATUS_INVAL;
+  fd = v4l2_open (devname, O_RDWR | O_NONBLOCK);
+  if (fd == -1)
+    return SANE_STATUS_INVAL;
+  s = calloc (1, sizeof (*s));
   if (!s)
-    return SANE_STATUS_NO_MEM;
-  memset (s, 0, sizeof (*s));
-  s->user_corner = 0;		/* ??? */
+    {
+      v4l2_close (fd);
+      return SANE_STATUS_NO_MEM;
+    }
+  s->fd = fd;
   s->devicename = devname;
-  s->fd = v4lfd;
-
-  if (v4l1_ioctl (s->fd, VIDIOCGCAP, &s->capability) == -1)
+  status = query_capability (fd, &s->capability);
+  if (status != SANE_STATUS_GOOD)
+    goto fail;
+  for (i = 0; i < MAX_CHANNELS; i++)
     {
-      DBG (1, "sane_open: ioctl (%d, VIDIOCGCAP,..) failed on `%s': %s\n",
-	   s->fd, devname, strerror (errno));
-      v4l1_close (s->fd);
-      return SANE_STATUS_INVAL;
-    }
-
-  DBG (5, "sane_open: %d channels, %d audio devices\n",
-       s->capability.channels, s->capability.audios);
-  DBG (5, "sane_open: minwidth=%d, minheight=%d, maxwidth=%d, "
-       "maxheight=%d\n", s->capability.minwidth, s->capability.minheight,
-       s->capability.maxwidth, s->capability.maxheight);
-  if (VID_TYPE_CAPTURE & s->capability.type)
-    DBG (5, "sane_open: V4L device can capture to memory\n");
-  if (VID_TYPE_TUNER & s->capability.type)
-    DBG (5, "sane_open: V4L device has a tuner of some form\n");
-  if (VID_TYPE_TELETEXT & s->capability.type)
-    DBG (5, "sane_open: V4L device supports teletext\n");
-  if (VID_TYPE_OVERLAY & s->capability.type)
-    DBG (5, "sane_open: V4L device can overlay its image onto the frame "
-	 "buffer\n");
-  if (VID_TYPE_CHROMAKEY & s->capability.type)
-    DBG (5, "sane_open: V4L device uses chromakey on overlay\n");
-  if (VID_TYPE_CLIPPING & s->capability.type)
-    DBG (5, "sane_open: V4L device supports overlay clipping\n");
-  if (VID_TYPE_FRAMERAM & s->capability.type)
-    DBG (5, "sane_open: V4L device overwrites frame buffer memory\n");
-  if (VID_TYPE_SCALES & s->capability.type)
-    DBG (5, "sane_open: V4L device supports hardware scaling\n");
-  if (VID_TYPE_MONOCHROME & s->capability.type)
-    DBG (5, "sane_open: V4L device is grey scale only\n");
-  if (VID_TYPE_SUBCAPTURE & s->capability.type)
-    DBG (5, "sane_open: V4L device can capture parts of the image\n");
-
-  if (s->capability.channels < max_channels)
-    max_channels = s->capability.channels;
-  for (i = 0; i < max_channels; i++)
-    {
-      channel.channel = i;
-      if (-1 == v4l1_ioctl (v4lfd, VIDIOCGCHAN, &channel))
-	{
-	  DBG (1, "sane_open: can't ioctl VIDIOCGCHAN %s: %s\n", devname,
-	       strerror (errno));
-	  return SANE_STATUS_INVAL;
-	}
-      DBG (5, "sane_open: channel %d (%s), tuners=%d, flags=0x%x, "
-	   "type=%d, norm=%d\n", channel.channel, channel.name,
-	   channel.tuners, channel.flags, channel.type, channel.norm);
-      if (VIDEO_VC_TUNER & channel.flags)
-	DBG (5, "sane_open: channel has tuner(s)\n");
-      if (VIDEO_VC_AUDIO & channel.flags)
-	DBG (5, "sane_open: channel has audio\n");
-      if (VIDEO_TYPE_TV == channel.type)
-	DBG (5, "sane_open: input is TV input\n");
-      if (VIDEO_TYPE_CAMERA == channel.type)
-	DBG (5, "sane_open: input is camera input\n");
-      s->channel[i] = strdup (channel.name);
+      memset (&input, 0, sizeof (input));
+      input.index = i;
+      if (xioctl (fd, VIDIOC_ENUMINPUT, &input) == -1)
+        break;
+      s->channel[i] = strdup ((const char *) input.name);
       if (!s->channel[i])
-	return SANE_STATUS_NO_MEM;
+        {
+          status = SANE_STATUS_NO_MEM;
+          goto fail;
+        }
     }
-  s->channel[i] = 0;
-  if (-1 == v4l1_ioctl (v4lfd, VIDIOCGPICT, &s->pict))
-    {
-      DBG (1, "sane_open: can't ioctl VIDIOCGPICT %s: %s\n", devname,
-	   strerror (errno));
-      return SANE_STATUS_INVAL;
-    }
-  DBG (5, "sane_open: brightness=%d, hue=%d, colour=%d, contrast=%d\n",
-       s->pict.brightness, s->pict.hue, s->pict.colour, s->pict.contrast);
-  DBG (5, "sane_open: whiteness=%d, depth=%d, palette=%d\n",
-       s->pict.whiteness, s->pict.depth, s->pict.palette);
-
-  /* ??? */
-  s->pict.palette = VIDEO_PALETTE_GREY;
-  if (-1 == v4l1_ioctl (s->fd, VIDIOCSPICT, &s->pict))
-    {
-      DBG (1, "sane_open: ioctl VIDIOCSPICT failed (%s)\n", strerror (errno));
-    }
-
-  if (-1 == v4l1_ioctl (s->fd, VIDIOCGWIN, &s->window))
-    {
-      DBG (1, "sane_open: can't ioctl VIDIOCGWIN %s: %s\n", devname,
-	   strerror (errno));
-      return SANE_STATUS_INVAL;
-    }
-  DBG (5, "sane_open: x=%d, y=%d, width=%d, height=%d\n",
-       s->window.x, s->window.y, s->window.width, s->window.height);
-
-  /* already done in sane_start
-     if (-1 == v4l1_ioctl (v4lfd, VIDIOCGMBUF, &mbuf))
-     DBG (1, "sane_open: can't ioctl VIDIOCGMBUF (no Fbuffer?)\n");
-   */
-
+  set_default_format (s);
+  query_frame_sizes (s);
   status = init_options (s);
   if (status != SANE_STATUS_GOOD)
-    return status;
-  update_parameters (s);
-
-  /* insert newly opened handle into list of open handles: */
+    goto fail;
+  status = update_parameters (s);
+  if (status != SANE_STATUS_GOOD)
+    goto fail;
   s->next = first_handle;
   first_handle = s;
-
   *handle = s;
-
   return SANE_STATUS_GOOD;
+
+fail:
+  free_channels (s);
+  free ((void *) s->val[OPT_MODE].s);
+  free ((void *) s->val[OPT_CHANNEL].s);
+  free ((void *) s->val[OPT_FRAME_SIZE].s);
+  v4l2_close (fd);
+  free (s);
+  return status;
 }
 
 void
 sane_close (SANE_Handle handle)
 {
-  V4L_Scanner *prev, *s;
-
-  DBG (2, "sane_close: trying to close handle %p\n", (void *) handle);
-  /* remove handle from list of open handles: */
-  prev = 0;
-  for (s = first_handle; s; s = s->next)
-    {
-      if (s == handle)
-	break;
-      prev = s;
-    }
+  V4L_Scanner **p;
+  V4L_Scanner *s = find_handle (handle);
   if (!s)
+    return;
+  sane_cancel (handle);
+  for (p = &first_handle; *p && *p != s; p = &(*p)->next)
+    ;
+  if (*p)
+    *p = s->next;
+  free_channels (s);
+  free ((void *) s->val[OPT_MODE].s);
+  free ((void *) s->val[OPT_CHANNEL].s);
+  free ((void *) s->val[OPT_FRAME_SIZE].s);
+  if (s->fd >= 0)
     {
-      DBG (1, "sane_close: bad handle %p\n", handle);
-      return;			/* oops, not a handle we know about */
+      v4l2_close (s->fd);
+      s->fd = -1;
     }
-  if (prev)
-    prev->next = s->next;
-  else
-    first_handle = s->next;
-
-  if (s->scanning)
-    sane_cancel (handle);
-  v4l1_close (s->fd);
   free (s);
 }
 
 const SANE_Option_Descriptor *
 sane_get_option_descriptor (SANE_Handle handle, SANE_Int option)
 {
-  V4L_Scanner *s = handle;
-
-  if ((unsigned) option >= NUM_OPTIONS || option < 0)
-    return 0;
-  DBG (4, "sane_get_option_descriptor: option %d (%s)\n", option,
-       s->opt[option].name ? s->opt[option].name : s->opt[option].title);
-  return s->opt + option;
+  V4L_Scanner *s = find_handle (handle);
+  if (!s || option < 0 || option >= NUM_OPTIONS)
+    return NULL;
+  return &s->opt[option];
 }
 
 SANE_Status
-sane_control_option (SANE_Handle handle, SANE_Int option,
-		     SANE_Action action, void *val, SANE_Int * info)
+sane_control_option (SANE_Handle handle, SANE_Int option, SANE_Action action,
+                     void *value, SANE_Int *info)
 {
-  V4L_Scanner *s = handle;
-  SANE_Status status;
-  SANE_Word cap;
-
+  V4L_Scanner *s = find_handle (handle);
+  char *copy;
+  const SANE_Word *word;
+  if (!s || !value || option < 0 || option >= NUM_OPTIONS)
+    return SANE_STATUS_INVAL;
   if (info)
     *info = 0;
-
-  if (option >= NUM_OPTIONS || option < 0)
-    return SANE_STATUS_INVAL;
-
-  DBG (4, "sane_control_option: %s option %d (%s)\n",
-       action == SANE_ACTION_GET_VALUE ? "get" :
-       action == SANE_ACTION_SET_VALUE ? "set" :
-       action == SANE_ACTION_SET_AUTO ? "auto set" :
-       "(unknown action with)", option,
-       s->opt[option].name ? s->opt[option].name : s->opt[option].title);
-
-  cap = s->opt[option].cap;
-
-  if (!SANE_OPTION_IS_ACTIVE (cap))
-    {
-      DBG (1, "sane_control option: option is inactive\n");
-      return SANE_STATUS_INVAL;
-    }
-
   if (action == SANE_ACTION_GET_VALUE)
     {
-      switch (option)
-	{
-	  /* word options: */
-	case OPT_NUM_OPTS:
-	case OPT_TL_X:
-	case OPT_TL_Y:
-	case OPT_BR_X:
-	case OPT_BR_Y:
-	case OPT_BRIGHTNESS:
-	case OPT_HUE:
-	case OPT_COLOR:
-	case OPT_CONTRAST:
-	case OPT_WHITE_LEVEL:
-	  *(SANE_Word *) val = s->val[option].w;
-	  return SANE_STATUS_GOOD;
-	case OPT_CHANNEL:	/* string list options */
-	case OPT_MODE:
-	  strcpy (val, s->val[option].s);
-	  return SANE_STATUS_GOOD;
-	default:
-	  DBG (1, "sane_control_option: option %d unknown\n", option);
-	}
-    }
-  else if (action == SANE_ACTION_SET_VALUE)
-    {
-      if (!SANE_OPTION_IS_SETTABLE (cap))
-	{
-	  DBG (1, "sane_control_option: option is not settable\n");
-	  return SANE_STATUS_INVAL;
-	}
-      status = sanei_constrain_value (s->opt + option, val, info);
-      if (status != SANE_STATUS_GOOD)
-	{
-	  DBG (1, "sane_control_option: sanei_constarin_value failed: %s\n",
-	       sane_strstatus (status));
-	  return status;
-	}
-      if (option >= OPT_TL_X && option <= OPT_BR_Y)
-	{
-	  s->user_corner |= 1 << (option - OPT_TL_X);
-	  if (-1 == v4l1_ioctl (s->fd, VIDIOCGWIN, &s->window))
-	    {
-	      DBG (1, "sane_control_option: ioctl VIDIOCGWIN failed "
-		   "(can not get window geometry)\n");
-	      return SANE_STATUS_INVAL;
-	    }
-	  s->window.clipcount = 0;
-	  s->window.clips = 0;
-	  s->window.height = parms.lines;
-	  s->window.width = parms.pixels_per_line;
-	}
-
-
-      switch (option)
-	{
-	  /* (mostly) side-effect-free word options: */
-	case OPT_TL_X:
-	  break;
-	case OPT_TL_Y:
-	  break;
-	case OPT_BR_X:
-	  s->window.width = *(SANE_Word *) val;
-	  parms.pixels_per_line = *(SANE_Word *) val;
-	  if (info)
-	    *info |= SANE_INFO_RELOAD_PARAMS;
-	  break;
-	case OPT_BR_Y:
-	  s->window.height = *(SANE_Word *) val;
-	  parms.lines = *(SANE_Word *) val;
-	  if (info)
-	    *info |= SANE_INFO_RELOAD_PARAMS;
-	  break;
-	case OPT_MODE:
-	  if (info)
-	    *info |= SANE_INFO_RELOAD_PARAMS | SANE_INFO_RELOAD_OPTIONS;
-	  s->val[option].s = strdup (val);
-	  if (!s->val[option].s)
-	    return SANE_STATUS_NO_MEM;
-	  if (strcmp (s->val[option].s, SANE_VALUE_SCAN_MODE_GRAY) == 0)
-	    s->pict.palette = VIDEO_PALETTE_GREY;
-	  else
-	    s->pict.palette = VIDEO_PALETTE_RGB24;
-	  update_parameters (s);
-	  break;
-	case OPT_BRIGHTNESS:
-	  s->pict.brightness = *(SANE_Word *) val *256;
-	  s->val[option].w = *(SANE_Word *) val;
-	  break;
-	case OPT_HUE:
-	  s->pict.hue = *(SANE_Word *) val *256;
-	  s->val[option].w = *(SANE_Word *) val;
-	  break;
-	case OPT_COLOR:
-	  s->pict.colour = *(SANE_Word *) val *256;
-	  s->val[option].w = *(SANE_Word *) val;
-	  break;
-	case OPT_CONTRAST:
-	  s->pict.contrast = *(SANE_Word *) val *256;
-	  s->val[option].w = *(SANE_Word *) val;
-	  break;
-	case OPT_WHITE_LEVEL:
-	  s->pict.whiteness = *(SANE_Word *) val *256;
-	  s->val[option].w = *(SANE_Word *) val;
-	  break;
-	case OPT_CHANNEL:
-	  {
-	    int i;
-	    struct video_channel channel;
-
-	    s->val[option].s = strdup (val);
-	    if (!s->val[option].s)
-	      return SANE_STATUS_NO_MEM;
-	    for (i = 0; i < MAX_CHANNELS; i++)
-	      {
-		if (strcmp (s->channel[i], val) == 0)
-		  {
-		    channel.channel = i;
-		    if (-1 == v4l1_ioctl (s->fd, VIDIOCGCHAN, &channel))
-		      {
-			DBG (1, "sane_open: can't ioctl VIDIOCGCHAN %s: %s\n",
-			     s->devicename, strerror (errno));
-			return SANE_STATUS_INVAL;
-		      }
-		    if (-1 == v4l1_ioctl (s->fd, VIDIOCSCHAN, &channel))
-		      {
-			DBG (1, "sane_open: can't ioctl VIDIOCSCHAN %s: %s\n",
-			     s->devicename, strerror (errno));
-			return SANE_STATUS_INVAL;
-		      }
-		    break;
-		  }
-	      }
-	    return SANE_STATUS_GOOD;
-	    break;
-	  }
-	default:
-	  DBG (1, "sane_control_option: option %d unknown\n", option);
-	  return SANE_STATUS_INVAL;
-	}
-      if (option >= OPT_TL_X && option <= OPT_BR_Y)
-	{
-	  if (-1 == v4l1_ioctl (s->fd, VIDIOCSWIN, &s->window))
-	    {
-	      DBG (1, "sane_control_option: ioctl VIDIOCSWIN failed (%s)\n",
-		   strerror (errno));
-	      /* return SANE_STATUS_INVAL; */
-	    }
-	  if (-1 == v4l1_ioctl (s->fd, VIDIOCGWIN, &s->window))
-	    {
-	      DBG (1, "sane_control_option: ioctl VIDIOCGWIN failed (%s)\n",
-		   strerror (errno));
-	      return SANE_STATUS_INVAL;
-	    }
-	}
-      if (option >= OPT_BRIGHTNESS && option <= OPT_WHITE_LEVEL)
-	{
-	  if (-1 == v4l1_ioctl (s->fd, VIDIOCSPICT, &s->pict))
-	    {
-	      DBG (1, "sane_control_option: ioctl VIDIOCSPICT failed (%s)\n",
-		   strerror (errno));
-	      /* return SANE_STATUS_INVAL; */
-	    }
-	}
+      if (option == OPT_MODE || option == OPT_CHANNEL || option == OPT_FRAME_SIZE)
+        strcpy (value, s->val[option].s ? s->val[option].s : "");
+      else if (option == OPT_NUM_OPTS
+               || (option >= OPT_TL_X && option <= OPT_BR_Y)
+               || option >= OPT_BRIGHTNESS)
+        *(SANE_Word *) value = s->val[option].w;
+      else
+        return SANE_STATUS_INVAL;
       return SANE_STATUS_GOOD;
     }
-  else if (action == SANE_ACTION_SET_AUTO)
+  if (action != SANE_ACTION_SET_VALUE
+      || !SANE_OPTION_IS_SETTABLE (s->opt[option].cap))
+    return SANE_STATUS_INVAL;
+  if (option == OPT_MODE || option == OPT_CHANNEL || option == OPT_FRAME_SIZE)
     {
-      if (!(cap & SANE_CAP_AUTOMATIC))
-	{
-	  DBG (1, "sane_control_option: option can't be set automatically\n");
-	  return SANE_STATUS_INVAL;
-	}
-      switch (option)
-	{
-	case OPT_BRIGHTNESS:
-	  /* not implemented yet */
-	  return SANE_STATUS_GOOD;
-
-	default:
-	  break;
-	}
+      copy = strdup (value);
+      if (!copy)
+        return SANE_STATUS_NO_MEM;
+      if (option == OPT_FRAME_SIZE)
+        {
+          unsigned i, width, height;
+          for (i = 0; i < s->frame_size_count; i++)
+            if (strcmp (s->frame_size_list[i], copy) == 0)
+              break;
+          if (i == s->frame_size_count
+              || sscanf (copy, "%ux%u", &width, &height) != 2)
+            {
+              free (copy);
+              return SANE_STATUS_INVAL;
+            }
+          s->frame_width = width;
+          s->frame_height = height;
+          s->geometry_range[0].max = SANE_FIX (width - 1);
+          s->geometry_range[1].max = SANE_FIX (height - 1);
+          s->geometry_range[2].max = SANE_FIX (width);
+          s->geometry_range[3].max = SANE_FIX (height);
+          s->val[OPT_TL_X].w = 0;
+          s->val[OPT_TL_Y].w = 0;
+          s->val[OPT_BR_X].w = SANE_FIX (width);
+          s->val[OPT_BR_Y].w = SANE_FIX (height);
+          free ((void *) s->val[option].s);
+          s->val[option].s = copy;
+          if (info)
+            *info |= SANE_INFO_RELOAD_PARAMS;
+          return SANE_STATUS_GOOD;
+        }
+      if (option == OPT_CHANNEL)
+        {
+          int i;
+          struct v4l2_input input;
+          for (i = 0; i < MAX_CHANNELS && s->channel[i]; i++)
+            if (strcmp (s->channel[i], copy) == 0)
+              {
+                if (s->val[option].s && strcmp (s->val[option].s, copy) == 0)
+                  {
+                    free (copy);
+                    return SANE_STATUS_GOOD;
+                  }
+                memset (&input, 0, sizeof (input));
+                input.index = i;
+                if (xioctl (s->fd, VIDIOC_S_INPUT, &input) == -1)
+                  {
+                    free (copy);
+                    return SANE_STATUS_INVAL;
+                  }
+                free ((void *) s->val[option].s);
+                s->val[option].s = copy;
+                return SANE_STATUS_GOOD;
+              }
+          free (copy);
+          return SANE_STATUS_INVAL;
+        }
+      free ((void *) s->val[option].s);
+      s->val[option].s = copy;
+      if (info)
+        *info |= SANE_INFO_RELOAD_PARAMS;
+      return SANE_STATUS_GOOD;
     }
-  return SANE_STATUS_INVAL;
+  word = value;
+  if (option >= OPT_TL_X && option <= OPT_BR_Y)
+    {
+      if (*word < s->opt[option].constraint.range->min
+          || *word > s->opt[option].constraint.range->max)
+        return SANE_STATUS_INVAL;
+      if ((option == OPT_TL_X && *word > s->val[OPT_BR_X].w)
+          || (option == OPT_TL_Y && *word > s->val[OPT_BR_Y].w)
+          || (option == OPT_BR_X && *word < s->val[OPT_TL_X].w)
+          || (option == OPT_BR_Y && *word < s->val[OPT_TL_Y].w))
+        return SANE_STATUS_INVAL;
+      s->val[option].w = *word;
+      if (info)
+        *info |= SANE_INFO_RELOAD_PARAMS;
+      return SANE_STATUS_GOOD;
+    }
+  if (option < OPT_BRIGHTNESS || option > OPT_WHITE_LEVEL)
+    return SANE_STATUS_INVAL;
+  switch (option)
+    {
+    case OPT_BRIGHTNESS: return set_control (s, V4L2_CID_BRIGHTNESS, *word);
+    case OPT_HUE: return set_control (s, V4L2_CID_HUE, *word);
+    case OPT_COLOR: return set_control (s, V4L2_CID_SATURATION, *word);
+    case OPT_CONTRAST: return set_control (s, V4L2_CID_CONTRAST, *word);
+    case OPT_WHITE_LEVEL: return set_control (s, V4L2_CID_WHITENESS, *word);
+    default: return SANE_STATUS_INVAL;
+    }
 }
 
 SANE_Status
-sane_get_parameters (SANE_Handle handle, SANE_Parameters * params)
+sane_get_parameters (SANE_Handle handle, SANE_Parameters *params)
 {
-  V4L_Scanner *s = handle;
-
-  DBG (4, "sane_get_parameters\n");
-  update_parameters (s);
-  if (params == 0)
-    {
-      DBG (1, "sane_get_parameters: params == 0\n");
-      return SANE_STATUS_INVAL;
-    }
-  if (-1 == v4l1_ioctl (s->fd, VIDIOCGWIN, &s->window))
-    {
-      DBG (1, "sane_control_option: ioctl VIDIOCGWIN failed "
-	   "(can not get window geometry)\n");
-      return SANE_STATUS_INVAL;
-    }
-  parms.pixels_per_line = s->window.width;
-  parms.bytes_per_line = s->window.width;
-  if (parms.format == SANE_FRAME_RGB)
-    parms.bytes_per_line = s->window.width * 3;
-  parms.lines = s->window.height;
-  *params = parms;
+  V4L_Scanner *s = find_handle (handle);
+  if (!s || !params)
+    return SANE_STATUS_INVAL;
+  if (update_parameters (s) != SANE_STATUS_GOOD)
+    return SANE_STATUS_INVAL;
+  *params = s->params;
   return SANE_STATUS_GOOD;
-
 }
 
 SANE_Status
 sane_start (SANE_Handle handle)
 {
-  int len;
-  V4L_Scanner *s;
-  char data;
-
-  DBG (2, "sane_start\n");
-  for (s = first_handle; s; s = s->next)
-    {
-      if (s == handle)
-	break;
-    }
+  V4L_Scanner *s = find_handle (handle);
+  struct v4l2_format format;
+  struct v4l2_capability capability;
+  __u32 pixel_format;
+  int fd;
+  SANE_Status status;
   if (!s)
+    return SANE_STATUS_INVAL;
+  cleanup_capture (s);
+  if (s->fd >= 0)
     {
-      DBG (1, "sane_start: bad handle %p\n", handle);
-      return SANE_STATUS_INVAL;	/* oops, not a handle we know about */
+      v4l2_close (s->fd);
+      s->fd = -1;
     }
-  len = v4l1_ioctl (s->fd, VIDIOCGCAP, &s->capability);
-  if (-1 == len)
+  fd = v4l2_open (s->devicename, O_RDWR | O_NONBLOCK);
+  if (fd == -1)
+    return SANE_STATUS_IO_ERROR;
+  s->fd = fd;
+  memset (&capability, 0, sizeof (capability));
+  status = query_capability (s->fd, &capability);
+  if (status != SANE_STATUS_GOOD)
+    goto fail;
+  s->capability = capability;
+  set_default_format (s);
+  s->gray_mode = !(s->val[OPT_MODE].s
+                   && strcmp (s->val[OPT_MODE].s,
+                              SANE_VALUE_SCAN_MODE_COLOR) == 0);
+  s->format.fmt.pix.width = s->frame_width;
+  s->format.fmt.pix.height = s->frame_height;
+  pixel_format = V4L2_PIX_FMT_RGB24;
+  format = s->format;
+  format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  format.fmt.pix.pixelformat = pixel_format;
+  format.fmt.pix.field = V4L2_FIELD_ANY;
+  if (xioctl (s->fd, VIDIOC_S_FMT, &format) == -1)
     {
-      DBG (1, "sane_start: can not get capabilities\n");
-      return SANE_STATUS_INVAL;
+      status = SANE_STATUS_INVAL;
+      goto fail;
     }
-  s->buffercount = 0;
-  if (-1 == v4l1_ioctl (s->fd, VIDIOCGMBUF, &s->mbuf))
-    {
-      s->is_mmap = SANE_FALSE;
-      buffer =
-	malloc (s->capability.maxwidth * s->capability.maxheight *
-		s->pict.depth);
-      if (0 == buffer)
-	return SANE_STATUS_NO_MEM;
-      DBG (3, "sane_start: V4L trying to read frame\n");
-      len = v4l1_read (s->fd, buffer, parms.bytes_per_line * parms.lines);
-      DBG (3, "sane_start: %d bytes read\n", len);
-    }
-  else
-    {
-      int loop;
-      s->is_mmap = SANE_TRUE;
-      DBG (3,
-	   "sane_start: mmap frame, buffersize: %d bytes, buffers: %d, offset 0 %d\n",
-	   s->mbuf.size, s->mbuf.frames, s->mbuf.offsets[0]);
-      buffer =
-	v4l1_mmap (0, s->mbuf.size, PROT_READ | PROT_WRITE, MAP_SHARED, s->fd, 0);
-      if (buffer == (void *)-1)
-	{
-	  DBG (1, "sane_start: mmap failed: %s\n", strerror (errno));
-	  buffer = NULL;
-	  return SANE_STATUS_IO_ERROR;
-	}
-      DBG (3, "sane_start: mmapped frame, capture 1 pict into %p\n", (void *) buffer);
-      s->mmap.frame = 0;
-      s->mmap.width = s->window.width;
-      /*   s->mmap.width = parms.pixels_per_line;  ??? huh? */
-      s->mmap.height = s->window.height;
-      /*      s->mmap.height = parms.lines;  ??? huh? */
-      s->mmap.format = s->pict.palette;
-      DBG (2, "sane_start: mmapped frame %d x %d with palette %d\n",
-	   s->mmap.width, s->mmap.height, s->mmap.format);
+  s->format_converted = format.fmt.pix.pixelformat != pixel_format;
+  if (s->format_converted)
+    DBG (3, "negotiated native format differs from requested RGB24; "
+         "using libv4l2 conversion\n");
+  /* Keep the format requested from libv4l2 as the logical SANE frame format.
+     A direct mmap fallback is disabled above when conversion is required. */
+  format.fmt.pix.pixelformat = pixel_format;
+  s->format = format;
+  debug_format (3, "negotiated format", &s->format.fmt.pix);
+  status = update_parameters (s);
+  if (status != SANE_STATUS_GOOD)
+    goto fail;
+  status = start_capture (s);
+  if (status == SANE_STATUS_GOOD)
+    return status;
 
-      /* We need to loop here to empty the read buffers, so we don't
-         get a stale image */
-      for (loop = 0; loop <= s->mbuf.frames; loop++)
-        {
-          len = v4l1_ioctl (s->fd, VIDIOCMCAPTURE, &s->mmap);
-          if (len == -1)
-	    {
-	      DBG (1, "sane_start: ioctl VIDIOCMCAPTURE failed: %s\n",
-	           strerror (errno));
-	      return SANE_STATUS_INVAL;
-	    }
-          DBG (3, "sane_start: waiting for frame %x, loop %d\n", s->mmap.frame, loop);
-          len = v4l1_ioctl (s->fd, VIDIOCSYNC, &(s->mmap.frame));
-          if (-1 == len)
-	    {
-	      DBG (1, "sane_start: call to ioctl(%d, VIDIOCSYNC, ..) failed\n",
-	           s->fd);
-	      return SANE_STATUS_INVAL;
-	    }
-        }
-      DBG (3, "sane_start: frame %x done\n", s->mmap.frame);
-    }
-
-  /* v4l1 actually returns BGR when we ask for RGB, so convert it */
-  if (s->pict.palette == VIDEO_PALETTE_RGB24)
+fail:
+  cleanup_capture (s);
+  if (s->fd >= 0)
     {
-      uint32_t loop;
-      DBG (3, "sane_start: converting from BGR to RGB\n");
-      for (loop = 0; loop < (s->window.width * s->window.height * 3); loop += 3)
-        {
-          data = *(buffer + loop);
-          *(buffer + loop) = *(buffer + loop + 2);
-          *(buffer + loop + 2) = data;
-        }
+      v4l2_close (s->fd);
+      s->fd = -1;
     }
-
-  DBG (3, "sane_start: done\n");
-  return SANE_STATUS_GOOD;
+  return status;
 }
 
 SANE_Status
-sane_read (SANE_Handle handle, SANE_Byte * buf, SANE_Int max_len,
-	   SANE_Int * lenp)
+sane_read (SANE_Handle handle, SANE_Byte *buf, SANE_Int max_len, SANE_Int *lenp)
 {
-  int i, min;
-  V4L_Scanner *s = handle;
-
-  DBG (4, "sane_read: max_len = %d\n", max_len);
-  if (!lenp)
-    {
-      DBG (1, "sane_read: lenp == 0\n");
-      return SANE_STATUS_INVAL;
-    }
-  if ((s->buffercount + 1) > (parms.lines * parms.bytes_per_line))
+  V4L_Scanner *s = find_handle (handle);
+  size_t remaining, count;
+  if (!s || !buf || !lenp || max_len < 0)
+    return SANE_STATUS_INVAL;
+  if (!s->scanning || s->offset >= s->frame_size)
     {
       *lenp = 0;
       return SANE_STATUS_EOF;
-    };
-  min = parms.lines * parms.bytes_per_line;
-  if (min > (max_len + s->buffercount))
-    min = (max_len + s->buffercount);
-  if (s->is_mmap == SANE_FALSE)
-    {
-      for (i = s->buffercount; i < (min + 0); i++)
-	{
-	  *(buf + i - s->buffercount) = *(buffer + i);
-	};
-      *lenp = (parms.lines * parms.bytes_per_line - s->buffercount);
-      if (max_len < *lenp)
-	*lenp = max_len;
-      DBG (3, "sane_read: transferred %d bytes (from %d to %d)\n", *lenp,
-	   s->buffercount, i);
-      s->buffercount = i;
     }
-  else
-    {
-      for (i = s->buffercount; i < (min + 0); i++)
-	{
-	  *(buf + i - s->buffercount) = *(buffer + i);
-	};
-      *lenp = (parms.lines * parms.bytes_per_line - s->buffercount);
-      if ((i - s->buffercount) < *lenp)
-	*lenp = (i - s->buffercount);
-      DBG (3, "sane_read: transferred %d bytes (from %d to %d)\n", *lenp,
-	   s->buffercount, i);
-      s->buffercount = i;
-    }
+  remaining = s->frame_size - s->offset;
+  count = MIN(remaining, (size_t) max_len);
+  memcpy (buf, (unsigned char *) s->buffer + s->offset, count);
+  s->offset += count;
+  *lenp = (SANE_Int) count;
+  if (s->offset >= s->frame_size)
+    cleanup_capture (s);
   return SANE_STATUS_GOOD;
 }
 
 void
 sane_cancel (SANE_Handle handle)
 {
-  V4L_Scanner *s = handle;
-
-  DBG (2, "sane_cancel\n");
-
-  /* ??? buffer isn't checked in sane_read? */
-  if (buffer)
-    {
-      if (s->is_mmap)
-	v4l1_munmap(buffer, s->mbuf.size);
-      else
-	free (buffer);
-
-      buffer = NULL;
-    }
+  V4L_Scanner *s = find_handle (handle);
+  if (s)
+    cleanup_capture (s);
 }
-
 
 SANE_Status
 sane_set_io_mode (SANE_Handle __sane_unused__ handle, SANE_Bool non_blocking)
 {
-  if (non_blocking == SANE_FALSE)
-    return SANE_STATUS_GOOD;
-  return SANE_STATUS_UNSUPPORTED;
+  return non_blocking ? SANE_STATUS_UNSUPPORTED : SANE_STATUS_GOOD;
 }
 
 SANE_Status
-sane_get_select_fd (SANE_Handle __sane_unused__ handle, SANE_Int __sane_unused__ * fd)
+sane_get_select_fd (SANE_Handle __sane_unused__ handle,
+                    SANE_Int __sane_unused__ *fd)
 {
   return SANE_STATUS_UNSUPPORTED;
 }

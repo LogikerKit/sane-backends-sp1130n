@@ -714,7 +714,7 @@ for be in ${BACKENDS}; do
 
     v4l)
     if test "${have_linux_ioctl_defines}" != "yes" \
-      || test "${have_libv4l1}" != "yes"; then
+      || test "${have_libv4l2}" != "yes"; then
       echo "*** $be backend requires v4l libraries - $DISABLE_MSG"
       backend_supported="no"
     fi
