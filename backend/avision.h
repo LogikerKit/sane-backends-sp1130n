@@ -636,6 +636,10 @@ typedef struct Avision_Device
     /* focus motor (SEND 0x88): focus and autofocus options */
   #define AV_FILM_FOCUS ((uint32_t)1<<8)
 
+    /* multi-sample takes two samples of every line: 2 background lines in
+       the window, every shading table twice, twice the lines to read */
+  #define AV_FILM_MULTI_SAMPLE_X2 ((uint32_t)1<<9)
+
   /* some version corrections */
   uint16_t data_dq; /* was ox0A0D - but hangs some new scanners */
 
@@ -666,6 +670,7 @@ typedef struct Avision_Scanner
   uint8_t* film_dark;
   int film_calib_pixels;
   int film_probe; /* FILM_PROBE_* window for set_window () */
+  SANE_Bool film_multi; /* this scan reads two samples of every line */
 
   /* background raster data, if duplex first front, then rear */
   uint8_t* background_raster;

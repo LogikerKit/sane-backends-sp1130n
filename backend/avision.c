@@ -4703,7 +4703,7 @@ attach (SANE_String_Const devname, Avision_ConnectionType con_type,
     dev->film_features = AV_FILM_HOST_CALIB | AV_FILM_EXPOSURE_RGB |
       AV_FILM_HOLDER_SENSE | AV_FILM_EXACT_FRAME | AV_FILM_RELEASE_HOME |
       AV_FILM_RES_800 | AV_FILM_VENDOR_OPTIONS | AV_FILM_VENDOR_WINDOW |
-      AV_FILM_FOCUS;
+      AV_FILM_FOCUS | AV_FILM_MULTI_SAMPLE_X2;
 
   dev->sane.name   = strdup (devname);
   dev->sane.vendor = dev->hw->real_mfg   ? dev->hw->real_mfg   : strdup (mfg);
@@ -6105,6 +6105,10 @@ object_position (Avision_Scanner* s, uint8_t position);
 #define FILM_AE_NO_FILM    62258
 #define FILM_AE_MARGIN     8
 
+/* with two samples per line the film moves slowly: a 32 line read takes
+   seconds, and sane_cancel () waits for the read in progress */
+#define FILM_MULTI_READ_LINES 4
+
 /* read the light status, the 0x70 line format and one 0x71 line - this
    switches the light on with the built-in firmware */
 static SANE_Status
@@ -6272,6 +6276,7 @@ film_send_shading (Avision_Scanner* s)
   SANE_Status status = SANE_STATUS_GOOD;
   uint8_t* dark;
   uint8_t* gain;
+  size_t table_size;
   int channel, x;
 
   DBG (3, "film_send_shading: %d pixels from %ld at %d dpi\n",
@@ -6326,6 +6331,34 @@ film_send_shading (Avision_Scanner* s)
       set_double_le ((gain + offset), (uint16_t) value);
     }
 
+  /* with two samples per line the vendor sends every table twice, one
+     copy after the other */
+  if (s->film_multi) {
+    const size_t n = (size_t) pixels * 2;
+    uint8_t** tables[2];
+    int t;
+
+    tables[0] = &dark;
+    tables[1] = &gain;
+    for (t = 0; t < 2; ++t) {
+      uint8_t* twice = malloc (n * 3 * 2);
+      for (channel = 0; twice && channel < 3; ++channel) {
+	memcpy (twice + 2 * (size_t) channel * n,
+		*tables[t] + (size_t) channel * n, n);
+	memcpy (twice + (2 * (size_t) channel + 1) * n,
+		*tables[t] + (size_t) channel * n, n);
+      }
+      free (*tables[t]);
+      *tables[t] = twice;
+    }
+    if (!dark || !gain) {
+      free (dark);
+      free (gain);
+      return SANE_STATUS_NO_MEM;
+    }
+  }
+  table_size = (size_t) pixels * 2 * (s->film_multi ? 2 : 1);
+
   /* dark R, G, B (qualifiers 3-5), then gains R, G, B (qualifiers 0-2) */
   for (channel = 0; channel < 6 && status == SANE_STATUS_GOOD; ++channel) {
     int q = (channel + 3) % 6;
@@ -6335,11 +6368,11 @@ film_send_shading (Avision_Scanner* s)
     scmd.opc = AVISION_SCSI_SEND;
     scmd.datatypecode = 0x82; /* download calibration data */
     set_double (scmd.datatypequal, q);
-    set_triple (scmd.transferlen, (size_t) pixels * 2);
+    set_triple (scmd.transferlen, table_size);
 
     status = avision_cmd (&s->av_con, &scmd, sizeof (scmd),
-			  table + (size_t) (q % 3) * (size_t) pixels * 2,
-			  (size_t) pixels * 2, 0, 0);
+			  table + (size_t) (q % 3) * table_size,
+			  table_size, 0, 0);
     if (status != SANE_STATUS_GOOD)
       DBG (1, "film_send_shading: qualifier %d failed (%s)\n", q,
 	   sane_strstatus (status));
@@ -6895,6 +6928,8 @@ set_window (Avision_Scanner* s)
     paralen += sizeof (cmd.window.avision.type.old);
   else if (dev->hw->feature_type & AV_MULTI_SHEET_SCAN)
     paralen += sizeof (cmd.window.avision.type.normal);
+  else if (s->film_multi) /* AV_FILM_MULTI_SAMPLE_X2: background lines */
+    paralen += sizeof (cmd.window.avision.type.normal);
   else
     paralen += sizeof (cmd.window.avision.type.normal) - 1;
 
@@ -7054,7 +7089,9 @@ set_window (Avision_Scanner* s)
 	if (s->val[OPT_IR].w)
 	  cmd.window.avision.type.normal.bitset3 |= (1 << 0);
 
-	if (s->val[OPT_MULTISAMPLE].w)
+	/* two samples per line only in the scan itself */
+	if ((dev->film_features & AV_FILM_MULTI_SAMPLE_X2) ?
+	    s->film_multi : s->val[OPT_MULTISAMPLE].w)
 	  cmd.window.avision.type.normal.bitset3 |= (1 << 1);
       }
 
@@ -7064,6 +7101,10 @@ set_window (Avision_Scanner* s)
 	cmd.window.avision.type.normal.bitset3 |= 0x10;
 	set_double (cmd.window.descriptor.halftone, 0x007f);
       }
+
+      /* two samples of every line (AV_FILM_MULTI_SAMPLE_X2) */
+      if (s->film_multi)
+	cmd.window.avision.type.normal.background_lines = 2;
 
       /* the sample line and focus sweep windows (AV_FILM_FOCUS) */
       if (s->film_probe == FILM_PROBE_SAMPLE)
@@ -7079,6 +7120,9 @@ set_window (Avision_Scanner* s)
   cmd.window.descriptor.padding_and_bitset = 3;
   cmd.window.descriptor.vendor_specific = 0xFF;
   cmd.window.descriptor.paralen = (uint8_t) paralen; /* R² was: 9, later 14 */
+  /* the vendor driver sends 20 in both window lengths */
+  if (s->film_multi)
+    cmd.window.descriptor.paralen = (uint8_t) (paralen - 1);
 
   /* This is normally unsupported by Avision scanners, and we do this
      via the gamma table - which works for all devices ... */
@@ -7642,6 +7686,50 @@ read_data (Avision_Scanner* s, SANE_Byte* buf, size_t* count)
   return status;
 }
 
+/* read count bytes of lines from a scan taking two samples per line:
+   twice as much data, every line followed by its second sample; return
+   the mean of each pair */
+static SANE_Status
+film_read_multi (Avision_Scanner* s, uint8_t* samples, SANE_Byte* buf,
+		 size_t* count)
+{
+  const size_t line = (size_t) s->avdimen.hw_bytes_per_line;
+  size_t size, pairs, i, j;
+  SANE_Status status;
+
+  if (!samples) {
+    *count = 0;
+    return SANE_STATUS_NO_MEM;
+  }
+
+  size = 2 * (*count - *count % line);
+  status = read_data (s, samples, &size);
+  if (status != SANE_STATUS_GOOD) {
+    *count = 0;
+    return status;
+  }
+
+  pairs = size / (2 * line);
+  if (size % (2 * line))
+    DBG (1, "film_read_multi: %lu bytes left over\n",
+	 (u_long) (size % (2 * line)));
+
+  /* 16-bit little endian samples */
+  for (i = 0; i < pairs; ++i) {
+    const uint8_t* a = samples + 2 * i * line;
+    const uint8_t* b = a + line;
+    uint8_t* out = buf + i * line;
+
+    for (j = 0; j + 1 < line; j += 2) {
+      unsigned int v = ((unsigned int) get_double_le ((a + j)) +
+			(unsigned int) get_double_le ((b + j)) + 1) / 2;
+      set_double_le ((out + j), v);
+    }
+  }
+  *count = pairs * line;
+  return SANE_STATUS_GOOD;
+}
+
 static SANE_Status
 init_options (Avision_Scanner* s)
 {
@@ -8021,10 +8109,8 @@ init_options (Avision_Scanner* s)
 
   /* TODO: No idea how to detect, assume exposure control devices are
      new enough to support this, for now. -ReneR */
-  /* the multi-sample line format of host calibrated film scanners is
-     not known */
-  if (!dev->inquiry_exposure_control ||
-      (dev->film_features & AV_FILM_HOST_CALIB)) {
+  /* AV_FILM_MULTI_SAMPLE_X2: two samples, averaged by the reader */
+  if (!dev->inquiry_exposure_control) {
     s->opt[OPT_MULTISAMPLE].cap |= SANE_CAP_INACTIVE;
   }
 
@@ -8313,6 +8399,7 @@ reader_process (void *data)
   /* the fat strip we currently puzzle together to perform software-colorpack
      and more */
   uint8_t* stripe_data;
+  uint8_t* multi_data = 0;
   /* the corrected output data */
   uint8_t* out_data;
   /* interpolation output data, one line */
@@ -8477,6 +8564,9 @@ reader_process (void *data)
        max_bytes_per_read, stripe_size, out_size);
 
   stripe_data = malloc (stripe_size);
+  /* two samples of every line, one after the other */
+  if (s->film_multi)
+    multi_data = malloc (2 * (size_t) stripe_size);
 
   /* for software scaling we need an additional interpolation line buffer */
   if (s->avdimen.hw_xres != s->avdimen.xres ||
@@ -8548,6 +8638,12 @@ reader_process (void *data)
 	  if (processed_bytes + this_read > total_size)
 	    this_read = total_size - processed_bytes;
 
+	  if (s->film_multi &&
+	      this_read > FILM_MULTI_READ_LINES *
+	      (size_t) s->avdimen.hw_bytes_per_line)
+	    this_read = FILM_MULTI_READ_LINES *
+	      (size_t) s->avdimen.hw_bytes_per_line;
+
           read_constrains(s, this_read);
 
 	  DBG (5, "reader_process: processed_bytes: %lu, total_size: %lu\n",
@@ -8564,7 +8660,11 @@ reader_process (void *data)
 	    }
 #endif
 
-	  status = read_data (s, stripe_data + stripe_fill, &this_read);
+	  if (s->film_multi)
+	    status = film_read_multi (s, multi_data,
+				      stripe_data + stripe_fill, &this_read);
+	  else
+	    status = read_data (s, stripe_data + stripe_fill, &this_read);
 
 	  if (sanei_thread_is_forked())
 	    sigprocmask (SIG_UNBLOCK, &sigterm_set, 0);
@@ -9244,6 +9344,7 @@ reader_process (void *data)
     free (out_data); /* if we have ip_history out_data is included there */
 
   free (stripe_data);
+  free (multi_data);
 
   DBG (3, "reader_process: returning success\n");
   return exit_status;
@@ -10615,6 +10716,8 @@ sane_start (SANE_Handle handle)
   /* Clear cancellation status */
   s->cancelled = SANE_FALSE;
 
+  /* calibration, focus and exposure windows take one sample per line */
+  s->film_multi = SANE_FALSE;
 
   /* Make sure we have a current parameter set. Some of the
      parameters will be overwritten below, but that's OK. */
@@ -10704,6 +10807,9 @@ sane_start (SANE_Handle handle)
   }
   else
   {
+    /* the scan itself may take two samples of every line */
+    s->film_multi = (dev->film_features & AV_FILM_MULTI_SAMPLE_X2) &&
+      s->val[OPT_MULTISAMPLE].w;
     status = set_window (s);
     if (status != SANE_STATUS_GOOD) {
       DBG (1, "sane_start: set scan window command failed: %s\n",
