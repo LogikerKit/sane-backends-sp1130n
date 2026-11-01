@@ -99,6 +99,16 @@ Ejects the film holder (Konica Minolta Dimage Scan Dual IV).
 Exposure time for each color, from 54 to 2033; 100 is the exposure used
 for calibration (Konica Minolta Dimage Scan Dual IV). Color negatives need much
 longer exposures, with a shorter one for red.
+.TP
+.B \-\-focus
+Focus position, from \-200 to 200, set before every scan (Konica Minolta
+Dimage Scan Dual IV). 0 is the position set at calibration.
+.TP
+.B \-\-autofocus
+Focuses on the center of the frame before every scan, which takes several
+seconds, and sets
+.B \-\-focus
+to the position found (Konica Minolta Dimage Scan Dual IV).
 
 .SH "DEVICE NAMES"
 This backend expects device names of the form:
