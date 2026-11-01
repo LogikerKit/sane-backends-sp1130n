@@ -329,6 +329,15 @@ typedef struct Avision_HWEntry {
   /* add the NVRAM flatbed side edge to the scan width (iVina FB6280E) */
   #define AV_NVRAM_SIDE_EDGE ((uint64_t)1<<50)
 
+  /* Window size is given in pixels at the scan resolution and position
+     in 1/optical resolution inch, instead of both in 1/1200 inch.
+     (Konica Minolta Dimage Scan Dual IV.) */
+  #define AV_WINDOW_IN_PIXELS ((uint64_t)1<<51)
+
+  /* 16-bit modes ask for 12 bits per channel in the window; the device still
+     returns full-range 16-bit samples. (Konica Minolta Dimage Scan Dual IV.) */
+  #define AV_WINDOW_BPC_12 ((uint64_t)1<<52)
+
     /* maybe more ...*/
   uint64_t feature_type;
 

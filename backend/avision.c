@@ -6517,16 +6517,32 @@ set_window (Avision_Scanner* s)
   set_double (cmd.window.descriptor.xres, s->avdimen.hw_xres);
   set_double (cmd.window.descriptor.yres, s->avdimen.hw_yres);
 
-  /* upper left corner x/y as well as width/length in inch * base_dpi
-     - avdimen are world pixels */
-  set_quad (cmd.window.descriptor.ulx, s->avdimen.tlx * base_dpi_abs / s->avdimen.hw_xres);
-  set_quad (cmd.window.descriptor.uly, s->avdimen.tly * base_dpi_abs / s->avdimen.hw_yres);
-
-  set_quad (cmd.window.descriptor.width,
-	    s->avdimen.hw_pixels_per_line * base_dpi_rel / s->avdimen.hw_xres + 1);
   line_count = s->avdimen.hw_lines + 2 * s->avdimen.line_difference;
-  set_quad (cmd.window.descriptor.length,
-	    line_count * base_dpi_rel / s->avdimen.hw_yres + 1);
+
+  if (dev->hw->feature_type & AV_WINDOW_IN_PIXELS) {
+    /* the size in pixels at the scan resolution, the upper left corner
+       in inch * optical resolution - avdimen are pixels */
+    set_quad (cmd.window.descriptor.ulx, s->avdimen.tlx *
+	      dev->inquiry_optical_res / s->avdimen.hw_xres);
+    set_quad (cmd.window.descriptor.uly, s->avdimen.tly *
+	      dev->inquiry_optical_res / s->avdimen.hw_yres);
+    set_quad (cmd.window.descriptor.width, s->avdimen.hw_pixels_per_line);
+    set_quad (cmd.window.descriptor.length, line_count);
+  }
+  else {
+    /* upper left corner x/y as well as width/length in inch * base_dpi
+       - avdimen are world pixels */
+    set_quad (cmd.window.descriptor.ulx,
+	      s->avdimen.tlx * base_dpi_abs / s->avdimen.hw_xres);
+    set_quad (cmd.window.descriptor.uly,
+	      s->avdimen.tly * base_dpi_abs / s->avdimen.hw_yres);
+
+    set_quad (cmd.window.descriptor.width,
+	      s->avdimen.hw_pixels_per_line * base_dpi_rel /
+	      s->avdimen.hw_xres + 1);
+    set_quad (cmd.window.descriptor.length,
+	      line_count * base_dpi_rel / s->avdimen.hw_yres + 1);
+  }
 
   /* interlaced duplex scans are twice as long */
   if (s->avdimen.interlaced_duplex && dev->scanner_type != AV_FILM) {
@@ -6685,6 +6701,8 @@ set_window (Avision_Scanner* s)
 
     case AV_TRUECOLOR16:
       cmd.window.descriptor.bpc = 16;
+      if (dev->hw->feature_type & AV_WINDOW_BPC_12)
+	cmd.window.descriptor.bpc = 12;
       cmd.window.descriptor.image_comp = 5;
       break;
 
