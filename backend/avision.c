@@ -8329,7 +8329,7 @@ reader_process (void *data)
 
 	      /* SANE Standard 3.2.1 "... bytes of each sample value are
 		 transmitted in the machine's native byte order." */
-	      *line_ptr = (uint8_t) v2;
+	      memcpy (line_ptr, &v2, sizeof (v2));
 
 	      line_ptr += s->avdimen.hw_bytes_per_line;
 	    }
