@@ -12,6 +12,11 @@
 # Ignore the ADF, for scanners that report one when none is fitted
 #option skip-adf
 
+# Konica Minolta Dimage Scan Dual IV: firmware file to upload when the
+# scanner asks for one after losing mains power. Not needed: without it
+# the scanner's built-in firmware is used. SANE does not provide this file.
+#option firmware @DATADIR@/sane/avision/dimage-scan-dual-iv.bin
+
 #scsi AVISION
 #scsi FCPA
 #scsi MINOLTA

@@ -35,6 +35,7 @@ a hash mark (#) are ignored. A sample configuration file is shown below:
  option skip\-adf
  option disable\-gamma\-table
  option disable\-calibration
+ option firmware @DATADIR@/sane/avision/dimage\-scan\-dual\-iv.bin
 \
  #scsi Vendor Model Type Bus Channel ID LUN
  scsi AVISION
@@ -76,6 +77,28 @@ disable\-calibration:
 Disables the scanner's color calibration. You
 might try this if your scans hang or only produce
 random garbage.
+.TP
+firmware \fIpath\fR:
+Konica Minolta Dimage Scan Dual IV only. After losing mains power the scanner
+runs its built-in firmware and asks for a firmware upload. The backend
+works with the built-in firmware, so this option is not needed. If it is
+set, the file at
+.I path
+is uploaded instead, but only if its MD5 checksum matches the firmware
+known to work with the backend; any other file is refused and the
+built-in firmware is used. SANE does not provide this file; the usual
+place for it is
+.IR @DATADIR@/sane/avision/ .
+The scanner asks only once after power-on, so the file is only uploaded
+if this backend is the first program to use the scanner.
+With an uploaded firmware, only the first calibration after the scanner
+is switched on is reliable. Later opens read calibration data that is too
+low, so images can be too bright with a color shift unless
+.B \-\-ae
+or
+.B \-\-ae\-wb
+is used. Switch the scanner off and on, with no film holder in it, to
+calibrate again. This has not been seen with the built-in firmware.
 .TP
 Note:
 Any option above modifies the default code-flow
