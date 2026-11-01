@@ -7627,6 +7627,7 @@ init_options (Avision_Scanner* s)
   s->opt[OPT_SENSORS_GROUP].title = SANE_TITLE_SENSORS;
   s->opt[OPT_SENSORS_GROUP].desc = SANE_DESC_SENSORS;
   s->opt[OPT_SENSORS_GROUP].type = SANE_TYPE_GROUP;
+  s->opt[OPT_SENSORS_GROUP].cap = 0;
   s->opt[OPT_SENSORS_GROUP].constraint_type = SANE_CONSTRAINT_NONE;
 
   s->opt[OPT_SCAN_SW].name = SANE_NAME_SCAN;
