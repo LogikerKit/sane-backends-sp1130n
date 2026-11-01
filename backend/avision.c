@@ -9690,6 +9690,7 @@ sane_start (SANE_Handle handle)
 	DBG (1, "sane_start: go home failed: %s\n",
 	     sane_strstatus (status));
     }
+    status = SANE_STATUS_NO_DOCS;
     goto stop_scanner_and_return;
   }
 
