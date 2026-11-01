@@ -110,6 +110,11 @@ seconds, and sets
 .B \-\-focus
 to the position found (Konica Minolta Dimage Scan Dual IV).
 .TP
+.B \-\-multi\-sample
+Reads every line twice and averages the two samples, for less noise; the
+film moves more slowly and the scan takes about three times as long (Konica
+Minolta Dimage Scan Dual IV).
+.TP
 .BR \-\-ae ", " \-\-ae\-wb
 Prescans the whole frame at 800 dpi before every scan and sets the scan
 exposure times so that the brightest part of the film comes near full scale:
