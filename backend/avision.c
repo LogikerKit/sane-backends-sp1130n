@@ -1719,6 +1719,15 @@ static const SANE_Range film_exposure_range =
     0 /* quantization */
   };
 
+/* manual focus range of the Dimage Scan Dual IV, the positions the
+   vendor's focus sweep reaches; it sends only even positions */
+static const SANE_Range film_focus_range =
+  {
+    -200, /* minimum */
+    200, /* maximum */
+    2 /* quantization */
+  };
+
 static SANE_Bool static_calib_list[3] =
   {
     SANE_FALSE, SANE_FALSE, SANE_FALSE
@@ -4693,7 +4702,8 @@ attach (SANE_String_Const devname, Avision_ConnectionType con_type,
   if (dev->hw->feature_type & AV_MINOLTA_DUAL_IV)
     dev->film_features = AV_FILM_HOST_CALIB | AV_FILM_EXPOSURE_RGB |
       AV_FILM_HOLDER_SENSE | AV_FILM_EXACT_FRAME | AV_FILM_RELEASE_HOME |
-      AV_FILM_RES_800 | AV_FILM_VENDOR_OPTIONS | AV_FILM_VENDOR_WINDOW;
+      AV_FILM_RES_800 | AV_FILM_VENDOR_OPTIONS | AV_FILM_VENDOR_WINDOW |
+      AV_FILM_FOCUS;
 
   dev->sane.name   = strdup (devname);
   dev->sane.vendor = dev->hw->real_mfg   ? dev->hw->real_mfg   : strdup (mfg);
@@ -6057,6 +6067,30 @@ normal_calibration (Avision_Scanner* s)
 static SANE_Status
 object_position (Avision_Scanner* s, uint8_t position);
 
+/* Dimage Scan Dual IV: the vendor's one line windows at the frame center,
+   256 pixels at the optical resolution, read before a scan to focus */
+#define FILM_PROBE_NONE   0
+#define FILM_PROBE_SAMPLE 1 /* one line, read once */
+#define FILM_PROBE_FOCUS  2 /* the same line, read again and again */
+#define FILM_PROBE_X      1560
+#define FILM_PROBE_Y      2340
+#define FILM_PROBE_PIXELS 256
+#define FILM_PROBE_LINES  3 /* lines per focus probe read */
+/* focus window exposure: the sample line's mean scaled to this level, at
+   most the longest exposure the vendor used in a focus window */
+#define FILM_PROBE_TARGET 16384
+#define FILM_PROBE_EXPOSURE_MAX 1262
+
+/* the vendor's focus sweep: coarse, then fine around the best coarse
+   position; every move to a final position comes from below */
+#define FILM_FOCUS_MIN          (-200)
+#define FILM_FOCUS_MAX          200
+#define FILM_FOCUS_SLACK        50
+#define FILM_FOCUS_COARSE_STEP  10
+#define FILM_FOCUS_FINE_STEP    2
+#define FILM_FOCUS_FINE_STEPS   50
+#define FILM_FOCUS_FINE_BELOW   40 /* fine sweep start below the coarse best */
+
 /* read the light status, the 0x70 line format and one 0x71 line - this
    switches the light on with the built-in firmware */
 static SANE_Status
@@ -7017,6 +7051,14 @@ set_window (Avision_Scanner* s)
 	set_double (cmd.window.descriptor.halftone, 0x007f);
       }
 
+      /* the sample line and focus sweep windows (AV_FILM_FOCUS) */
+      if (s->film_probe == FILM_PROBE_SAMPLE)
+	cmd.window.avision.type.normal.bitset3 |= 0x88;
+      else if (s->film_probe == FILM_PROBE_FOCUS) {
+	cmd.window.avision.type.normal.bitset2 = 0x02;
+	cmd.window.avision.type.normal.bitset3 |= 0x04;
+	cmd.window.avision.type.normal.auto_focus = 3;
+      }
     }
 
   /* fixed values */
@@ -7987,6 +8029,28 @@ init_options (Avision_Scanner* s)
       (dev->film_features & AV_FILM_VENDOR_OPTIONS)) {
     s->opt[OPT_IR].cap |= SANE_CAP_INACTIVE;
   }
+
+  /* film focus, set before every scan */
+  s->opt[OPT_FOCUS].name = SANE_NAME_FOCUS;
+  s->opt[OPT_FOCUS].title = SANE_TITLE_FOCUS;
+  s->opt[OPT_FOCUS].desc = SANE_DESC_FOCUS;
+  s->opt[OPT_FOCUS].type = SANE_TYPE_INT;
+  s->opt[OPT_FOCUS].unit = SANE_UNIT_NONE;
+  s->opt[OPT_FOCUS].constraint_type = SANE_CONSTRAINT_RANGE;
+  s->opt[OPT_FOCUS].constraint.range = &film_focus_range;
+  s->val[OPT_FOCUS].w = 0;
+  if (!(dev->film_features & AV_FILM_FOCUS))
+    s->opt[OPT_FOCUS].cap |= SANE_CAP_INACTIVE;
+
+  /* film autofocus, sets the focus option */
+  s->opt[OPT_AUTOFOCUS].name = SANE_NAME_AUTOFOCUS;
+  s->opt[OPT_AUTOFOCUS].title = SANE_TITLE_AUTOFOCUS;
+  s->opt[OPT_AUTOFOCUS].desc = SANE_DESC_AUTOFOCUS;
+  s->opt[OPT_AUTOFOCUS].type = SANE_TYPE_BOOL;
+  s->opt[OPT_AUTOFOCUS].unit = SANE_UNIT_NONE;
+  s->val[OPT_AUTOFOCUS].w = SANE_FALSE;
+  if (!(dev->film_features & AV_FILM_FOCUS))
+    s->opt[OPT_AUTOFOCUS].cap |= SANE_CAP_INACTIVE;
 
   /* "MISC" group: */
   s->opt[OPT_MISC_GROUP].title = SANE_TITLE_MISC_GROUP;
@@ -9468,6 +9532,229 @@ film_calibrate (Avision_Scanner* s)
   return status;
 }
 
+/* move the focus to position, from below as the vendor does */
+static SANE_Status
+film_move_focus (Avision_Scanner* s, int position)
+{
+  SANE_Status status;
+
+  DBG (3, "film_move_focus: %d -> %d\n", s->hw->focus_position, position);
+
+  status = film_set_focus (s, position - FILM_FOCUS_SLACK);
+  if (status == SANE_STATUS_GOOD)
+    status = film_set_focus (s, position);
+  return status;
+}
+
+/* set the window for a probe at the frame center and start the scan */
+static SANE_Status
+film_start_probe (Avision_Scanner* s, int probe)
+{
+  Avision_Device* dev = s->hw;
+  int default_res = s->val[OPT_RESOLUTION].w;
+  color_mode default_mode = s->c_mode;
+  SANE_Status status;
+
+  DBG (3, "film_start_probe: %d\n", probe);
+
+  s->val[OPT_RESOLUTION].w = dev->inquiry_optical_res;
+  s->c_mode = AV_TRUECOLOR16;
+  compute_parameters (s);
+  s->val[OPT_RESOLUTION].w = default_res;
+  s->c_mode = default_mode;
+
+  s->avdimen.tlx = FILM_PROBE_X;
+  s->avdimen.tly = FILM_PROBE_Y;
+  s->avdimen.hw_pixels_per_line = FILM_PROBE_PIXELS;
+  s->avdimen.hw_bytes_per_line = FILM_PROBE_PIXELS * 3 * 2;
+  s->avdimen.hw_lines = 1;
+  s->avdimen.line_difference = 0;
+
+  s->film_probe = probe;
+  status = set_window (s);
+  s->film_probe = FILM_PROBE_NONE;
+
+  if (status == SANE_STATUS_GOOD)
+    status = film_send_shading (s);
+  if (status == SANE_STATUS_GOOD)
+    status = reserve_unit (s);
+  if (status == SANE_STATUS_GOOD)
+    status = start_scan (s);
+  if (status == SANE_STATUS_GOOD)
+    status = send_acceleration_table (s);
+  if (status != SANE_STATUS_GOOD)
+    DBG (1, "film_start_probe: failed (%s)\n", sane_strstatus (status));
+  return status;
+}
+
+/* read lines of the probe, return the focus score: the sum of the
+   absolute differences of neighbouring green samples, and the mean of
+   each channel */
+static SANE_Status
+film_read_probe (Avision_Scanner* s, int lines, double* score, double* mean)
+{
+  uint8_t data[FILM_PROBE_PIXELS * 3 * 2 * FILM_PROBE_LINES];
+  size_t size = (size_t) lines * FILM_PROBE_PIXELS * 3 * 2;
+  SANE_Status status;
+  double sum = 0, total[3] = { 0, 0, 0 };
+  int line, x, c;
+
+  status = read_data (s, data, &size);
+  if (status != SANE_STATUS_GOOD) {
+    DBG (1, "film_read_probe: read failed (%s)\n", sane_strstatus (status));
+    return status;
+  }
+  lines = (int) (size / (FILM_PROBE_PIXELS * 3 * 2));
+
+  for (line = 0; line < lines; ++line) {
+    const uint8_t* green = data + (size_t) line * FILM_PROBE_PIXELS * 6 + 2;
+    for (x = 0; x + 1 < FILM_PROBE_PIXELS; ++x) {
+      int a = get_double_le ((green + x * 6));
+      int b = get_double_le ((green + (x + 1) * 6));
+      sum += abs (b - a);
+    }
+    for (x = 0; x < FILM_PROBE_PIXELS; ++x)
+      for (c = 0; c < 3; ++c)
+	total[c] += get_double_le ((data + (size_t) line *
+				    FILM_PROBE_PIXELS * 6 + x * 6 + c * 2));
+  }
+  if (score)
+    *score = sum;
+  if (mean)
+    for (c = 0; c < 3; ++c)
+      mean[c] = lines > 0 ? total[c] / (lines * FILM_PROBE_PIXELS) : 0;
+  return SANE_STATUS_GOOD;
+}
+
+/* move the focus, then read a focus probe */
+static SANE_Status
+film_focus_probe (Avision_Scanner* s, int position, double* score)
+{
+  SANE_Status status;
+
+  if (s->cancelled)
+    return SANE_STATUS_CANCELLED;
+  status = film_set_focus (s, position);
+  if (status == SANE_STATUS_GOOD)
+    status = film_read_probe (s, FILM_PROBE_LINES, score, 0);
+  if (status == SANE_STATUS_GOOD && score)
+    DBG (3, "film_focus_probe: %d: %.0f\n", position, *score);
+  return status;
+}
+
+/* the vendor's autofocus: a sample line, then a coarse and a fine sweep of
+   the focus over the same line; the best focus is our own choice */
+static SANE_Status
+film_autofocus (Avision_Scanner* s)
+{
+  double fine[FILM_FOCUS_FINE_STEPS];
+  double mean[3];
+  double score, best_score = -1;
+  SANE_Word exposure[3];
+  int best = 0, start, i, position;
+  SANE_Status status, status2;
+
+  DBG (3, "film_autofocus:\n");
+
+  /* the sample line, at the scan exposures */
+  status = film_start_probe (s, FILM_PROBE_SAMPLE);
+  if (status == SANE_STATUS_GOOD)
+    status = film_read_probe (s, 1, 0, mean);
+  status2 = release_unit (s, 0);
+  if (status == SANE_STATUS_GOOD)
+    status = status2;
+  if (status != SANE_STATUS_GOOD)
+    return status;
+  if (s->cancelled)
+    return SANE_STATUS_CANCELLED;
+
+  /* a dense film needs more light than the scan exposures give, or the
+     focus scores are lost in noise */
+  for (i = 0; i < 3; ++i) {
+    double e = (double) s->val[OPT_EXPOSURE_R + i].w;
+
+    exposure[i] = s->val[OPT_EXPOSURE_R + i].w;
+    e = mean[i] >= 1 ? e * FILM_PROBE_TARGET / mean[i] :
+      FILM_PROBE_EXPOSURE_MAX;
+    if (e > FILM_PROBE_EXPOSURE_MAX)
+      e = FILM_PROBE_EXPOSURE_MAX;
+    if (e < film_exposure_range.min)
+      e = film_exposure_range.min;
+    s->val[OPT_EXPOSURE_R + i].w = (SANE_Word) (e + 0.5);
+  }
+  DBG (3, "film_autofocus: sample means %.0f %.0f %.0f, exposures %d %d %d\n",
+       mean[0], mean[1], mean[2], s->val[OPT_EXPOSURE_R].w,
+       s->val[OPT_EXPOSURE_G].w, s->val[OPT_EXPOSURE_B].w);
+
+  status = film_set_focus (s, FILM_FOCUS_MIN - FILM_FOCUS_SLACK);
+  if (status == SANE_STATUS_GOOD)
+    status = film_start_probe (s, FILM_PROBE_FOCUS);
+  for (i = 0; i < 3; ++i)
+    s->val[OPT_EXPOSURE_R + i].w = exposure[i];
+  if (status == SANE_STATUS_GOOD)
+    status = film_read_probe (s, FILM_PROBE_LINES, 0, 0);
+
+  /* coarse */
+  for (position = FILM_FOCUS_MIN;
+       status == SANE_STATUS_GOOD && position <= FILM_FOCUS_MAX;
+       position += FILM_FOCUS_COARSE_STEP) {
+    status = film_focus_probe (s, position, &score);
+    if (status == SANE_STATUS_GOOD && score > best_score) {
+      best_score = score;
+      best = position;
+    }
+  }
+
+  /* fine */
+  start = best - FILM_FOCUS_FINE_BELOW;
+  if (start < FILM_FOCUS_MIN)
+    start = FILM_FOCUS_MIN;
+  if (start > FILM_FOCUS_MAX -
+      (FILM_FOCUS_FINE_STEPS - 1) * FILM_FOCUS_FINE_STEP)
+    start = FILM_FOCUS_MAX -
+      (FILM_FOCUS_FINE_STEPS - 1) * FILM_FOCUS_FINE_STEP;
+  if (status == SANE_STATUS_GOOD)
+    status = film_focus_probe (s, start - FILM_FOCUS_SLACK, 0);
+  for (i = 0; status == SANE_STATUS_GOOD && i < FILM_FOCUS_FINE_STEPS; ++i)
+    status = film_focus_probe (s, start + i * FILM_FOCUS_FINE_STEP,
+			       &fine[i]);
+
+  /* the fine scores are noisy: take the best sum of three neighbours */
+  if (status == SANE_STATUS_GOOD) {
+    best_score = -1;
+    for (i = 0; i < FILM_FOCUS_FINE_STEPS; ++i) {
+      score = fine[i > 0 ? i - 1 : i] + fine[i] +
+	fine[i + 1 < FILM_FOCUS_FINE_STEPS ? i + 1 : i];
+      if (score > best_score) {
+	best_score = score;
+	best = start + i * FILM_FOCUS_FINE_STEP;
+      }
+    }
+    DBG (3, "film_autofocus: best focus %d\n", best);
+  }
+
+  if (status == SANE_STATUS_GOOD)
+    status = film_focus_probe (s, best - FILM_FOCUS_SLACK, 0);
+  if (status == SANE_STATUS_GOOD)
+    status = film_focus_probe (s, best, 0);
+
+  /* also after a failure: release and go home as after a scan */
+  status2 = release_unit (s, 0);
+  if (status2 == SANE_STATUS_GOOD)
+    status2 = object_position (s, AVISION_SCSI_OP_GO_HOME);
+  if (status2 == SANE_STATUS_GOOD)
+    status2 = wait_ready (&s->av_con, 1);
+  if (status == SANE_STATUS_GOOD)
+    status = status2;
+
+  compute_parameters (s);
+  if (status == SANE_STATUS_GOOD)
+    s->val[OPT_FOCUS].w = best;
+  else
+    DBG (1, "film_autofocus: failed (%s)\n", sane_strstatus (status));
+  return status;
+}
+
 SANE_Status
 sane_open (SANE_String_Const devicename, SANE_Handle *handle)
 {
@@ -9793,6 +10080,8 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
 	case OPT_EXPOSURE_B:
 	case OPT_IR:
 	case OPT_MULTISAMPLE:
+	case OPT_FOCUS:
+	case OPT_AUTOFOCUS:
 	case OPT_QSCAN:
 	case OPT_QCALIB:
 	case OPT_PAPERLEN:
@@ -9886,6 +10175,7 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
 	case OPT_EXPOSURE_B:
 	case OPT_IR:
 	case OPT_MULTISAMPLE:
+	case OPT_FOCUS:
 	case OPT_QSCAN:
 	case OPT_QCALIB:
 	case OPT_OVERSCAN_TOP:
@@ -9991,6 +10281,17 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
 	      *info |= SANE_INFO_RELOAD_OPTIONS;
 	    return status;
 	  }
+	case OPT_AUTOFOCUS:
+	  s->val[option].w = *(SANE_Word*) val;
+	  /* autofocus sets the focus itself */
+	  if (s->val[option].w)
+	    s->opt[OPT_FOCUS].cap |= SANE_CAP_INACTIVE;
+	  else
+	    s->opt[OPT_FOCUS].cap &= ~SANE_CAP_INACTIVE;
+	  if (info)
+	    *info |= SANE_INFO_RELOAD_OPTIONS;
+	  return SANE_STATUS_GOOD;
+
 	case OPT_EJECT:
 	  {
 	    /* frame 0xff ejects the holder */
@@ -10127,6 +10428,16 @@ sane_start (SANE_Handle handle)
     if (status != SANE_STATUS_GOOD)
       return status;
     dev->current_frame = s->val[OPT_FRAME].w;
+  }
+
+  /* then focus, as the vendor does */
+  if (dev->film_features & AV_FILM_FOCUS) {
+    if (s->val[OPT_AUTOFOCUS].w)
+      status = film_autofocus (s);
+    else if (s->val[OPT_FOCUS].w != dev->focus_position)
+      status = film_move_focus (s, s->val[OPT_FOCUS].w);
+    if (status != SANE_STATUS_GOOD)
+      return status;
   }
 
   /* Check the light early, to return to the GUI and notify the user. */

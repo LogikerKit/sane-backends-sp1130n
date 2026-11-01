@@ -437,6 +437,8 @@ enum Avision_Option
   OPT_EXPOSURE_B,
   OPT_IR,                /* infra-red */
   OPT_MULTISAMPLE,       /* multi-sample */
+  OPT_FOCUS,             /* film focus position */
+  OPT_AUTOFOCUS,         /* film autofocus before the scan */
 
   OPT_MISC_GROUP,
   OPT_FRAME,             /* Film holder control */
@@ -629,6 +631,9 @@ typedef struct Avision_Device
        driver sends them, meaning unknown */
   #define AV_FILM_VENDOR_WINDOW ((uint32_t)1<<7)
 
+    /* focus motor (SEND 0x88): focus and autofocus options */
+  #define AV_FILM_FOCUS ((uint32_t)1<<8)
+
   /* some version corrections */
   uint16_t data_dq; /* was ox0A0D - but hangs some new scanners */
 
@@ -658,6 +663,7 @@ typedef struct Avision_Scanner
   uint8_t* film_white;
   uint8_t* film_dark;
   int film_calib_pixels;
+  int film_probe; /* FILM_PROBE_* window for set_window () */
 
   /* background raster data, if duplex first front, then rear */
   uint8_t* background_raster;
