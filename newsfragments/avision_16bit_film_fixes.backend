@@ -1,0 +1,3 @@
+avision: Fixed a crash and wrong sample values in 16-bit scans at resolutions the backend scales in software.
+avision: Fixed the sample values of 12-bit scans, and of 16-bit scans on big-endian hosts, after software calibration.
+avision: A film scanner without a film holder now returns SANE_STATUS_NO_DOCS from sane_start().
