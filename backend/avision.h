@@ -439,6 +439,8 @@ enum Avision_Option
   OPT_MULTISAMPLE,       /* multi-sample */
   OPT_FOCUS,             /* film focus position */
   OPT_AUTOFOCUS,         /* film autofocus before the scan */
+  OPT_AE,                /* film auto exposure before the scan */
+  OPT_AE_WB,             /* the same, each channel on its own */
 
   OPT_MISC_GROUP,
   OPT_FRAME,             /* Film holder control */
@@ -603,8 +605,8 @@ typedef struct Avision_Device
        every scan window (SEND 0x82 qualifiers 3-5, 0-2) */
   #define AV_FILM_HOST_CALIB ((uint32_t)1<<0)
 
-    /* separate red, green and blue exposure times in the window,
-       instead of one exposure option */
+    /* separate red, green and blue exposure times in the window, and
+       auto exposure, instead of one exposure option */
   #define AV_FILM_EXPOSURE_RGB ((uint32_t)1<<1)
 
     /* the holder is sensed and the frame selected before every scan; the

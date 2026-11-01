@@ -6091,6 +6091,20 @@ object_position (Avision_Scanner* s, uint8_t position);
 #define FILM_FOCUS_FINE_STEPS   50
 #define FILM_FOCUS_FINE_BELOW   40 /* fine sweep start below the coarse best */
 
+/* our own auto exposure: a whole frame prescan at the calibration
+   exposure, where film cannot clip; the brightest 0.1 percent of the
+   central 90 percent of the frame is put at 90 percent of full scale */
+#define FILM_AE_RESOLUTION 800
+#define FILM_AE_EXPOSURE   100
+#define FILM_AE_BORDER     20     /* 1/20 of the frame left out each side */
+#define FILM_AE_PERMILLE   999
+#define FILM_AE_TARGET     58982  /* 0.9 * 65535 */
+/* no film: all three channels at 95 percent of full scale or more, where
+   white is calibrated to full scale; pixels this close to it are left out
+   too, as the edge of the film is blurred */
+#define FILM_AE_NO_FILM    62258
+#define FILM_AE_MARGIN     8
+
 /* read the light status, the 0x70 line format and one 0x71 line - this
    switches the light on with the built-in firmware */
 static SANE_Status
@@ -8052,6 +8066,26 @@ init_options (Avision_Scanner* s)
   if (!(dev->film_features & AV_FILM_FOCUS))
     s->opt[OPT_AUTOFOCUS].cap |= SANE_CAP_INACTIVE;
 
+  /* film auto exposure, sets the exposure options; names as coolscan3 */
+  s->opt[OPT_AE].name = "ae";
+  s->opt[OPT_AE].title = SANE_I18N ("Auto-exposure");
+  s->opt[OPT_AE].desc = SANE_I18N ("Perform auto-exposure before scan");
+  s->opt[OPT_AE].type = SANE_TYPE_BOOL;
+  s->opt[OPT_AE].unit = SANE_UNIT_NONE;
+  s->val[OPT_AE].w = SANE_FALSE;
+  s->opt[OPT_AE_WB].name = "ae-wb";
+  s->opt[OPT_AE_WB].title =
+    SANE_I18N ("Auto-exposure with white balance");
+  s->opt[OPT_AE_WB].desc =
+    SANE_I18N ("Perform auto-exposure with white balance before scan");
+  s->opt[OPT_AE_WB].type = SANE_TYPE_BOOL;
+  s->opt[OPT_AE_WB].unit = SANE_UNIT_NONE;
+  s->val[OPT_AE_WB].w = SANE_FALSE;
+  if (!(dev->film_features & AV_FILM_EXPOSURE_RGB)) {
+    s->opt[OPT_AE].cap |= SANE_CAP_INACTIVE;
+    s->opt[OPT_AE_WB].cap |= SANE_CAP_INACTIVE;
+  }
+
   /* "MISC" group: */
   s->opt[OPT_MISC_GROUP].title = SANE_TITLE_MISC_GROUP;
   s->opt[OPT_MISC_GROUP].type = SANE_TYPE_GROUP;
@@ -9483,44 +9517,73 @@ sane_get_devices (const SANE_Device*** device_list, SANE_Bool local_only)
   return SANE_STATUS_GOOD;
 }
 
-/* film calibration: light on, full resolution 16-bit window, shading and
-   focus - this also moves a loaded holder to a known position */
-static SANE_Status
-film_calibrate (Avision_Scanner* s)
+/* the options a whole frame window of our own changes */
+struct film_window_options
 {
-  SANE_Word resolution = s->val[OPT_RESOLUTION].w;
-  color_mode mode = s->c_mode;
-  SANE_Word geometry[4], exposure[3];
-  SANE_Status status;
+  SANE_Word resolution;
+  SANE_Word geometry[4]; /* OPT_TL_X to OPT_BR_Y */
+  SANE_Word exposure[3];
+  color_mode mode;
+};
+
+/* save the options, then set them for the whole frame in 16-bit color
+   at the given resolution and exposure */
+static void
+film_whole_frame (Avision_Scanner* s, struct film_window_options* saved,
+		  SANE_Word resolution, SANE_Word exposure)
+{
   int i;
 
-  /* the calibration data is read in the 16-bit color format, for the
-     whole frame at the optical resolution and always at exposure 100;
-     the built-in firmware only lights the lamp after a line read */
+  saved->resolution = s->val[OPT_RESOLUTION].w;
+  saved->mode = s->c_mode;
   for (i = 0; i < 4; ++i)
-    geometry[i] = s->val[OPT_TL_X + i].w;
-  for (i = 0; i < 3; ++i) {
-    exposure[i] = s->val[OPT_EXPOSURE_R + i].w;
-    s->val[OPT_EXPOSURE_R + i].w = 100;
-  }
-  s->val[OPT_RESOLUTION].w = s->hw->inquiry_optical_res;
+    saved->geometry[i] = s->val[OPT_TL_X + i].w;
+  for (i = 0; i < 3; ++i)
+    saved->exposure[i] = s->val[OPT_EXPOSURE_R + i].w;
+
+  s->val[OPT_RESOLUTION].w = resolution;
   s->c_mode = AV_TRUECOLOR16;
   s->val[OPT_TL_X].w = 0;
   s->val[OPT_TL_Y].w = 0;
   s->val[OPT_BR_X].w = s->hw->x_range.max;
   s->val[OPT_BR_Y].w = s->hw->y_range.max;
+  for (i = 0; i < 3; ++i)
+    s->val[OPT_EXPOSURE_R + i].w = exposure;
   compute_parameters (s);
+}
 
+/* put the options back; the scan parameters stay those of the frame
+   until compute_parameters () */
+static void
+film_restore_options (Avision_Scanner* s,
+		      const struct film_window_options* saved)
+{
+  int i;
+
+  s->val[OPT_RESOLUTION].w = saved->resolution;
+  s->c_mode = saved->mode;
+  for (i = 0; i < 4; ++i)
+    s->val[OPT_TL_X + i].w = saved->geometry[i];
+  for (i = 0; i < 3; ++i)
+    s->val[OPT_EXPOSURE_R + i].w = saved->exposure[i];
+}
+
+/* film calibration: light on, full resolution 16-bit window, shading and
+   focus - this also moves a loaded holder to a known position */
+static SANE_Status
+film_calibrate (Avision_Scanner* s)
+{
+  struct film_window_options saved;
+  SANE_Status status;
+
+  /* the calibration data is read in the 16-bit color format, for the
+     whole frame at the optical resolution and always at exposure 100;
+     the built-in firmware only lights the lamp after a line read */
+  film_whole_frame (s, &saved, s->hw->inquiry_optical_res, 100);
   status = film_light_on (s);
   if (status == SANE_STATUS_GOOD)
     status = set_window (s);
-
-  s->val[OPT_RESOLUTION].w = resolution;
-  s->c_mode = mode;
-  for (i = 0; i < 4; ++i)
-    s->val[OPT_TL_X + i].w = geometry[i];
-  for (i = 0; i < 3; ++i)
-    s->val[OPT_EXPOSURE_R + i].w = exposure[i];
+  film_restore_options (s, &saved);
 
   /* goes home between white and dark itself */
   if (status == SANE_STATUS_GOOD)
@@ -9752,6 +9815,165 @@ film_autofocus (Avision_Scanner* s)
     s->val[OPT_FOCUS].w = best;
   else
     DBG (1, "film_autofocus: failed (%s)\n", sane_strstatus (status));
+  return status;
+}
+
+/* prescan the whole frame at the calibration exposure and set the scan
+   exposures from the film in it, leaving out where there is no film;
+   white balance sets each channel on its own, else all three get the
+   exposure of the channel nearest to clipping */
+static SANE_Status
+film_autoexposure (Avision_Scanner* s, SANE_Bool white_balance)
+{
+  Avision_Device* dev = s->hw;
+  struct film_window_options saved;
+  uint32_t* histogram = 0;
+  uint8_t* data = 0;
+  uint8_t* mask = 0;
+  double exposure[3], factor = 0;
+  long counted = 0;
+  int pixels = 0, lines = 0, bytes_per_line = 0, chunk_lines, line = 0;
+  int c, x;
+  SANE_Status status, status2;
+
+  DBG (3, "film_autoexposure: white balance %d\n", white_balance);
+
+  /* the whole frame at 800 dpi at exposure 100 */
+  film_whole_frame (s, &saved, FILM_AE_RESOLUTION, FILM_AE_EXPOSURE);
+  status = set_window (s);
+  film_restore_options (s, &saved);
+
+  if (status == SANE_STATUS_GOOD)
+    status = film_send_shading (s);
+
+  pixels = s->avdimen.hw_pixels_per_line;
+  lines = s->avdimen.hw_lines + 2 * s->avdimen.line_difference;
+  bytes_per_line = s->avdimen.hw_bytes_per_line;
+  chunk_lines = dev->read_stripe_size > 0 ? dev->read_stripe_size : 1;
+
+  if (status == SANE_STATUS_GOOD) {
+    histogram = calloc (3 * 65536, sizeof (*histogram));
+    data = malloc ((size_t) lines * (size_t) bytes_per_line);
+    mask = calloc ((size_t) lines * (size_t) pixels, 2);
+    if (!histogram || !data || !mask)
+      status = SANE_STATUS_NO_MEM;
+  }
+
+  if (status == SANE_STATUS_GOOD)
+    status = reserve_unit (s);
+  if (status == SANE_STATUS_GOOD)
+    status = start_scan (s);
+  if (status == SANE_STATUS_GOOD)
+    status = send_acceleration_table (s);
+
+  /* read the whole frame, so that the scanner holds no data afterwards */
+  while (status == SANE_STATUS_GOOD && line < lines) {
+    int n = lines - line < chunk_lines ? lines - line : chunk_lines;
+    size_t size = (size_t) n * (size_t) bytes_per_line;
+
+    if (s->cancelled) {
+      status = SANE_STATUS_CANCELLED;
+      break;
+    }
+    status = read_data (s, data + (size_t) line * (size_t) bytes_per_line,
+			&size);
+    if (status != SANE_STATUS_GOOD)
+      break;
+    n = (int) (size / (size_t) bytes_per_line);
+    if (n == 0) {
+      status = SANE_STATUS_IO_ERROR;
+      break;
+    }
+    line += n;
+  }
+
+  /* release and go home as after a scan, also after a failure */
+  status2 = release_unit (s, 0);
+  if (status2 == SANE_STATUS_GOOD)
+    status2 = object_position (s, AVISION_SCSI_OP_GO_HOME);
+  if (status2 == SANE_STATUS_GOOD)
+    status2 = wait_ready (&s->av_con, 1);
+  if (status == SANE_STATUS_GOOD)
+    status = status2;
+
+  /* mark no film, widen the marks by the margin across, then down */
+  if (status == SANE_STATUS_GOOD) {
+    uint8_t* across = mask + (size_t) lines * (size_t) pixels;
+    int y, d;
+
+    for (y = 0; y < lines; ++y)
+      for (x = 0; x < pixels; ++x) {
+	const uint8_t* p = data + (size_t) y * (size_t) bytes_per_line +
+	  x * 6;
+	mask[(size_t) y * (size_t) pixels + (size_t) x] =
+	  get_double_le (p) >= FILM_AE_NO_FILM &&
+	  get_double_le ((p + 2)) >= FILM_AE_NO_FILM &&
+	  get_double_le ((p + 4)) >= FILM_AE_NO_FILM;
+      }
+    for (y = 0; y < lines; ++y)
+      for (x = 0; x < pixels; ++x) {
+	uint8_t m = 0;
+	for (d = -FILM_AE_MARGIN; d <= FILM_AE_MARGIN && !m; ++d)
+	  if (x + d >= 0 && x + d < pixels)
+	    m = mask[(size_t) y * (size_t) pixels + (size_t) (x + d)];
+	across[(size_t) y * (size_t) pixels + (size_t) x] = m;
+      }
+
+    /* the central part of the frame, away from no film */
+    for (y = lines / FILM_AE_BORDER; y < lines - lines / FILM_AE_BORDER;
+	 ++y)
+      for (x = pixels / FILM_AE_BORDER;
+	   x < pixels - pixels / FILM_AE_BORDER; ++x) {
+	const uint8_t* p = data + (size_t) y * (size_t) bytes_per_line +
+	  x * 6;
+	uint8_t m = 0;
+	for (d = -FILM_AE_MARGIN; d <= FILM_AE_MARGIN && !m; ++d)
+	  if (y + d >= 0 && y + d < lines)
+	    m = across[(size_t) (y + d) * (size_t) pixels + (size_t) x];
+	if (m)
+	  continue;
+	for (c = 0; c < 3; ++c)
+	  ++histogram[c * 65536 + get_double_le ((p + c * 2))];
+	++counted;
+      }
+    DBG (3, "film_autoexposure: %ld pixels of film\n", counted);
+    if (counted == 0)
+      DBG (1, "film_autoexposure: no film, exposures unchanged\n");
+  }
+
+  if (status == SANE_STATUS_GOOD && counted > 0) {
+    for (c = 0; c < 3; ++c) {
+      long limit = counted * FILM_AE_PERMILLE / 1000, sum = 0;
+      int level = 0;
+
+      while (level < 65535 && sum + histogram[c * 65536 + level] <= limit)
+	sum += histogram[c * 65536 + level++];
+      exposure[c] = (double) FILM_AE_EXPOSURE * FILM_AE_TARGET /
+	(level > 0 ? level : 1);
+      DBG (3, "film_autoexposure: channel %d: level %d, exposure %.0f\n",
+	   c, level, exposure[c]);
+      if (c == 0 || exposure[c] < factor)
+	factor = exposure[c];
+    }
+    for (c = 0; c < 3; ++c) {
+      double e = white_balance ? exposure[c] : factor;
+      if (e > film_exposure_range.max)
+	e = film_exposure_range.max;
+      if (e < film_exposure_range.min)
+	e = film_exposure_range.min;
+      s->val[OPT_EXPOSURE_R + c].w = (SANE_Word) (e + 0.5);
+    }
+    DBG (3, "film_autoexposure: exposures %d %d %d\n",
+	 s->val[OPT_EXPOSURE_R].w, s->val[OPT_EXPOSURE_G].w,
+	 s->val[OPT_EXPOSURE_B].w);
+  }
+  else if (status != SANE_STATUS_GOOD)
+    DBG (1, "film_autoexposure: failed (%s)\n", sane_strstatus (status));
+
+  free (histogram);
+  free (data);
+  free (mask);
+  compute_parameters (s);
   return status;
 }
 
@@ -10082,6 +10304,8 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
 	case OPT_MULTISAMPLE:
 	case OPT_FOCUS:
 	case OPT_AUTOFOCUS:
+	case OPT_AE:
+	case OPT_AE_WB:
 	case OPT_QSCAN:
 	case OPT_QCALIB:
 	case OPT_PAPERLEN:
@@ -10292,6 +10516,23 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
 	    *info |= SANE_INFO_RELOAD_OPTIONS;
 	  return SANE_STATUS_GOOD;
 
+	case OPT_AE:
+	case OPT_AE_WB:
+	  {
+	    int i;
+
+	    s->val[option].w = *(SANE_Word*) val;
+	    /* auto exposure sets the exposures itself */
+	    for (i = OPT_EXPOSURE_R; i <= OPT_EXPOSURE_B; ++i)
+	      if (s->val[OPT_AE].w || s->val[OPT_AE_WB].w)
+		s->opt[i].cap |= SANE_CAP_INACTIVE;
+	      else
+		s->opt[i].cap &= ~SANE_CAP_INACTIVE;
+	    if (info)
+	      *info |= SANE_INFO_RELOAD_OPTIONS;
+	    return SANE_STATUS_GOOD;
+	  }
+
 	case OPT_EJECT:
 	  {
 	    /* frame 0xff ejects the holder */
@@ -10436,6 +10677,14 @@ sane_start (SANE_Handle handle)
       status = film_autofocus (s);
     else if (s->val[OPT_FOCUS].w != dev->focus_position)
       status = film_move_focus (s, s->val[OPT_FOCUS].w);
+    if (status != SANE_STATUS_GOOD)
+      return status;
+  }
+
+  /* then exposure, as the vendor's preview follows its focus */
+  if ((dev->film_features & AV_FILM_EXPOSURE_RGB) &&
+      (s->val[OPT_AE].w || s->val[OPT_AE_WB].w)) {
+    status = film_autoexposure (s, s->val[OPT_AE_WB].w);
     if (status != SANE_STATUS_GOOD)
       return status;
   }
