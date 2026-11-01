@@ -8361,6 +8361,7 @@ reader_process (void *data)
 	    int syy = sy + 1;
 
 	    const int hwbpl = s->avdimen.hw_bytes_per_line;
+	    const int hwbpl16 = hwbpl / 2; /* in 16-bit samples */
 
 	    uint8_t* dst = ip_data;
 	    uint16_t* dst16 = (uint16_t*) ip_data;
@@ -8395,6 +8396,14 @@ reader_process (void *data)
 	      const int sx = (int)floor(bx);
 	      const int xdist = (int) ((bx - sx) * 256);
 	      const int sxx = sx + 1;
+
+	      /* the 16-bit weights are unsigned, as a sample times 256 * 256
+		 does not fit an int */
+	      const unsigned int w00 =
+		(unsigned int) ((256-xdist) * (256-ydist));
+	      const unsigned int w01 = (unsigned int) (xdist * (256-ydist));
+	      const unsigned int w10 = (unsigned int) ((256-xdist) * ydist);
+	      const unsigned int w11 = (unsigned int) (xdist * ydist);
 
 	      if (x == 0 || x == s->params.pixels_per_line - 1)
 		 DBG (8, "reader_process: x: %d <- from: %d-%d\n",
@@ -8438,12 +8447,10 @@ reader_process (void *data)
 	      case AV_GRAYSCALE16:
 		{
 		  /* TODO: test! */
-		  v = (unsigned int) (
-		    ( out_data16 [sy*hwbpl  + sx ] * (256-xdist) * (256-ydist) +
-		      out_data16 [sy*hwbpl  + sxx] * xdist       * (256-ydist) +
-		      out_data16 [syy*hwbpl + sx ] * (256-xdist) * ydist +
-		      out_data16 [syy*hwbpl + sxx] * xdist       * ydist
-		      ) / (256 * 256));
+		  v = ( out_data16 [sy*hwbpl16  + sx ] * w00 +
+			out_data16 [sy*hwbpl16  + sxx] * w01 +
+			out_data16 [syy*hwbpl16 + sx ] * w10 +
+			out_data16 [syy*hwbpl16 + sxx] * w11 ) / (256 * 256);
 		  *dst16++ = (uint16_t) v;
 		}
 		break;
@@ -8471,12 +8478,11 @@ reader_process (void *data)
 		  int c;
 		  for (c = 0; c < 3; ++c)
 		    {
-		      v = (unsigned int) (
-			( out_data16 [sy*hwbpl  + sx*3  + c] * (256-xdist) * (256-ydist) +
-			  out_data16 [sy*hwbpl  + sxx*3 + c] * xdist       * (256-ydist) +
-			  out_data16 [syy*hwbpl + sx*3  + c] * (256-xdist) * ydist +
-			  out_data16 [syy*hwbpl + sxx*3 + c] * xdist       * ydist
-			  ) / (256 * 256));
+		      v = ( out_data16 [sy*hwbpl16  + sx*3  + c] * w00 +
+			    out_data16 [sy*hwbpl16  + sxx*3 + c] * w01 +
+			    out_data16 [syy*hwbpl16 + sx*3  + c] * w10 +
+			    out_data16 [syy*hwbpl16 + sxx*3 + c] * w11 )
+			/ (256 * 256);
 		      *dst16++ = (uint16_t) v;
 		    }
 		}
