@@ -143,6 +143,7 @@
 #include "../include/sane/sanei_config.h"
 #include "../include/sane/sanei_backend.h"
 
+
 #include <avision.h>
 
 /* For timeval... */
@@ -979,6 +980,17 @@ static Avision_HWEntry Avision_Device_List [] =
     /* comment="1 pass, film-scanner" */
     /* status="good" */
 
+    { NULL, NULL,
+      0x132b, 0x000a,
+      "Konica Minolta", "Dimage Scan Dual IV",
+      AV_FILMSCANNER | AV_ACCEL_TABLE | AV_SOFT_SCALE | AV_NO_GAMMA |
+      AV_WINDOW_IN_PIXELS | AV_WINDOW_BPC_12 | AV_MINOLTA_DUAL_IV |
+      AV_NO_QCALIB_MODE,
+      { 0, {0, 0}, {{0, 0}, {0, 0}} }
+    },
+    /* comment="1 pass, film-scanner" */
+    /* status="basic" */
+
     { "QMS", "SC-110",
       0x0638, 0x0a15,
       "Minolta-QMS", "SC-110",
@@ -1687,6 +1699,24 @@ static const int  hw_res_list_generic[] =
     600, 1200, 2400, 4800,
     /* ... */
     0
+  };
+
+/* hardware and offered resolutions of the Dimage Scan Dual IV */
+static const int  hw_res_list_film[] =
+  {
+    800, 1600, 3200, 0
+  };
+static const SANE_Word film_res_list[] =
+  {
+    5, 400, 800, 1200, 1600, 3200
+  };
+
+/* per channel exposure range of the Dimage Scan Dual IV */
+static const SANE_Range film_exposure_range =
+  {
+    54, /* minimum */
+    2033, /* maximum */
+    0 /* quantization */
   };
 
 static SANE_Bool static_calib_list[3] =
@@ -3017,6 +3047,9 @@ compute_parameters (Avision_Scanner* s)
     const int* hw_res_list =
       dev->inquiry_asic_type == AV_ASIC_C5 ? hw_res_list_c5 : hw_res_list_generic;
 
+    if (dev->film_features & AV_FILM_RES_800)
+      hw_res_list = hw_res_list_film;
+
     for (hw_res = hw_res_list; *hw_res && *hw_res < s->avdimen.xres; ++hw_res)
       /* just iterate */;
     s->avdimen.hw_xres = *hw_res;
@@ -3054,6 +3087,27 @@ compute_parameters (Avision_Scanner* s)
     / MM_PER_INCH);
   s->avdimen.bry = (long int) (s->avdimen.hw_yres * SANE_UNFIX (s->val[OPT_BR_Y].w)
     / MM_PER_INCH);
+
+  /* nearest whole pixels, within the film frame */
+  if (dev->film_features & AV_FILM_EXACT_FRAME) {
+    const long x_max = lround (s->avdimen.hw_xres *
+      dev->inquiry_x_ranges[s->source_mode_dim] / MM_PER_INCH);
+    const long y_max = lround (s->avdimen.hw_yres *
+      dev->inquiry_y_ranges[s->source_mode_dim] / MM_PER_INCH);
+
+    s->avdimen.tlx = lround (s->avdimen.hw_xres *
+      SANE_UNFIX (s->val[OPT_TL_X].w) / MM_PER_INCH);
+    s->avdimen.tly = lround (s->avdimen.hw_yres *
+      SANE_UNFIX (s->val[OPT_TL_Y].w) / MM_PER_INCH);
+    s->avdimen.brx = lround (s->avdimen.hw_xres *
+      SANE_UNFIX (s->val[OPT_BR_X].w) / MM_PER_INCH);
+    s->avdimen.bry = lround (s->avdimen.hw_yres *
+      SANE_UNFIX (s->val[OPT_BR_Y].w) / MM_PER_INCH);
+    if (s->avdimen.brx > x_max)
+      s->avdimen.brx = x_max;
+    if (s->avdimen.bry > y_max)
+      s->avdimen.bry = y_max;
+  }
 
   /* line difference */
   if (color_mode_is_color (s->c_mode) &&
@@ -4255,6 +4309,14 @@ get_frame_info (Avision_Scanner* s)
   set_triple (rcmd.transferlen, size);
 
   status = avision_cmd (&s->av_con, &rcmd, sizeof (rcmd), 0, 0, result, &size);
+  if (status != SANE_STATUS_GOOD &&
+      (dev->film_features & AV_FILM_HOLDER_SENSE)) {
+    DBG (1, "get_frame_info: read failed (%s), retrying\n",
+	 sane_strstatus (status));
+    size = sizeof (result);
+    status = avision_cmd (&s->av_con, &rcmd, sizeof (rcmd), 0, 0,
+			  result, &size);
+  }
   if (status != SANE_STATUS_GOOD || size != sizeof (result)) {
     status = (status != SANE_STATUS_GOOD)? status: SANE_STATUS_IO_ERROR;
     DBG (1, "get_frame_info: read failed (%s)\n", sane_strstatus (status));
@@ -4288,6 +4350,20 @@ get_frame_info (Avision_Scanner* s)
     dev->frame_range.max = result[2];
   else
     dev->frame_range.max = 1;
+
+  /* no frame to select or holder to eject without a film holder */
+  if (dev->film_features & AV_FILM_HOLDER_SENSE) {
+    if (result[0] == 0xff) {
+      /* the frame byte is meaningless without a holder */
+      dev->current_frame = 1;
+      s->opt[OPT_FRAME].cap |= SANE_CAP_INACTIVE;
+      s->opt[OPT_EJECT].cap |= SANE_CAP_INACTIVE;
+    }
+    else {
+      s->opt[OPT_FRAME].cap &= ~SANE_CAP_INACTIVE;
+      s->opt[OPT_EJECT].cap &= ~SANE_CAP_INACTIVE;
+    }
+  }
 
   return SANE_STATUS_GOOD;
 }
@@ -4612,6 +4688,12 @@ attach (SANE_String_Const devname, Avision_ConnectionType con_type,
   memset (dev, 0, sizeof (*dev));
 
   dev->hw = &Avision_Device_List[model_num];
+
+  /* the film behavior of the model */
+  if (dev->hw->feature_type & AV_MINOLTA_DUAL_IV)
+    dev->film_features = AV_FILM_HOST_CALIB | AV_FILM_EXPOSURE_RGB |
+      AV_FILM_HOLDER_SENSE | AV_FILM_EXACT_FRAME | AV_FILM_RELEASE_HOME |
+      AV_FILM_RES_800 | AV_FILM_VENDOR_OPTIONS | AV_FILM_VENDOR_WINDOW;
 
   dev->sane.name   = strdup (devname);
   dev->sane.vendor = dev->hw->real_mfg   ? dev->hw->real_mfg   : strdup (mfg);
@@ -5015,6 +5097,16 @@ get_double ( &(result[48] ) ));
       (double)get_double (&(result[85])) * MM_PER_INCH / base_dpi + .1;
     dev->inquiry_y_ranges [AV_ADF_DIM] =
       (double)get_double (&(result[87])) * MM_PER_INCH / base_dpi;
+
+    /* the film frame exactly, without the .1 mm for paper formats */
+    if (dev->film_features & AV_FILM_EXACT_FRAME) {
+      dev->inquiry_x_ranges [AV_NORMAL_DIM] =
+	(double)get_double (&(result[81])) * MM_PER_INCH / base_dpi;
+      dev->inquiry_x_ranges [AV_TRANSPARENT_DIM] =
+	(double)get_double (&(result[77])) * MM_PER_INCH / base_dpi;
+      dev->inquiry_x_ranges [AV_ADF_DIM] =
+	(double)get_double (&(result[85])) * MM_PER_INCH / base_dpi;
+    }
   }
 
   dev->inquiry_tune_scan_length = BIT(result[94],2);
@@ -5354,7 +5446,9 @@ additional_probe (Avision_Scanner* s)
   }
 
   if (dev->inquiry_channels_per_pixel > 1) {
-    add_color_mode (dev, AV_TRUECOLOR, SANE_VALUE_SCAN_MODE_COLOR);
+    /* the vendor driver only scans 12 bits per channel */
+    if (!(dev->film_features & AV_FILM_VENDOR_OPTIONS))
+      add_color_mode (dev, AV_TRUECOLOR, SANE_VALUE_SCAN_MODE_COLOR);
 
     if (dev->inquiry_bits_per_channel == 12)
       add_color_mode (dev, AV_TRUECOLOR12, "12bit Color");
@@ -5960,6 +6054,254 @@ normal_calibration (Avision_Scanner* s)
   return status;
 }
 
+static SANE_Status
+object_position (Avision_Scanner* s, uint8_t position);
+
+/* read the light status, the 0x70 line format and one 0x71 line - this
+   switches the light on with the built-in firmware */
+static SANE_Status
+film_light_on (Avision_Scanner* s)
+{
+  struct command_read rcmd;
+  uint8_t format[32];
+  uint8_t* line;
+  size_t size, line_size;
+  SANE_Status status;
+
+  DBG (3, "film_light_on:\n");
+
+  status = wait_4_light (s);
+  if (status != SANE_STATUS_GOOD)
+    return status;
+
+  memset (&rcmd, 0, sizeof (rcmd));
+  rcmd.opc = AVISION_SCSI_READ;
+  set_double (rcmd.datatypequal, s->hw->data_dq);
+
+  rcmd.datatypecode = 0x70; /* line format */
+  size = sizeof (format);
+  set_triple (rcmd.transferlen, size);
+  status = avision_cmd (&s->av_con, &rcmd, sizeof (rcmd), 0, 0, format,
+			&size);
+  if (status != SANE_STATUS_GOOD)
+    return status;
+
+  /* pixels, bytes per sample, RGB */
+  line_size = (size_t) get_double (format) * format[2] * 3;
+  DBG (3, "film_light_on: line of %zu bytes\n", line_size);
+  if (line_size == 0 || line_size > 0x10000)
+    return SANE_STATUS_IO_ERROR;
+
+  line = malloc (line_size);
+  if (!line)
+    return SANE_STATUS_NO_MEM;
+  rcmd.datatypecode = 0x71; /* one line */
+  size = line_size;
+  set_triple (rcmd.transferlen, size);
+  status = avision_cmd (&s->av_con, &rcmd, sizeof (rcmd), 0, 0, line,
+			&size);
+  free (line);
+  return status;
+}
+
+/* read white, go home, read dark - needs a window set before */
+static SANE_Status
+film_read_shading (Avision_Scanner* s)
+{
+  struct calibration_format format;
+  SANE_Status status;
+  uint8_t* data;
+  size_t size;
+  int center, white, dark;
+
+  DBG (1, "film_read_shading:\n");
+
+  status = get_calib_format (s, &format);
+  if (status != SANE_STATUS_GOOD)
+    return status;
+
+  if (format.channels != 3 || format.bytes_per_channel != 2 ||
+      format.lines == 0 || format.pixel_per_line == 0) {
+    DBG (1, "film_read_shading: unexpected format: %d channels, "
+	 "%d bytes, %d lines, %d pixels\n", format.channels,
+	 format.bytes_per_channel, format.lines, format.pixel_per_line);
+    return SANE_STATUS_IO_ERROR;
+  }
+
+  size = (size_t) format.lines * format.pixel_per_line * 3 * 2;
+  data = malloc (size);
+  if (!data)
+    return SANE_STATUS_NO_MEM;
+
+  free (s->film_white);
+  free (s->film_dark);
+  s->film_white = s->film_dark = NULL;
+
+  status = get_calib_data (s, 0x62, data, size); /* white */
+  if (status == SANE_STATUS_GOOD) {
+    s->film_white = sort_and_average (&format, data);
+
+    status = object_position (s, AVISION_SCSI_OP_GO_HOME);
+    if (status == SANE_STATUS_GOOD)
+      status = wait_ready (&s->av_con, 1);
+  }
+  if (status == SANE_STATUS_GOOD) {
+    status = get_calib_data (s, 0x66, data, size); /* dark */
+    if (status == SANE_STATUS_GOOD)
+      s->film_dark = sort_and_average (&format, data);
+  }
+  free (data);
+
+  if (status != SANE_STATUS_GOOD)
+    return status;
+  if (!s->film_white || !s->film_dark)
+    return SANE_STATUS_NO_MEM;
+
+  s->film_calib_pixels = format.pixel_per_line;
+  center = s->film_calib_pixels / 2 * 3 * 2;
+  DBG (3, "film_read_shading: %d pixels, center white %d/%d/%d, "
+       "dark %d/%d/%d\n", s->film_calib_pixels,
+       get_double ((s->film_white + center)),
+       get_double ((s->film_white + center + 2)),
+       get_double ((s->film_white + center + 4)),
+       get_double ((s->film_dark + center)),
+       get_double ((s->film_dark + center + 2)),
+       get_double ((s->film_dark + center + 4)));
+  white = get_double ((s->film_white + center + 2));
+  dark = get_double ((s->film_dark + center + 2));
+
+  /* the device sets its gains on the first calibration after power-on and
+     keeps them until mains power is removed: without light the white data
+     is dark then and saturated afterwards */
+  if (white < dark + 1000) {
+    DBG (0, "The scanner's light did not come on during calibration.\n");
+    return SANE_STATUS_IO_ERROR;
+  }
+  if (white >= 0xff00) {
+    DBG (0, "The scanner's calibration is saturated. Unplug its power "
+	 "cable for 10 seconds\nand try again.\n");
+    return SANE_STATUS_IO_ERROR;
+  }
+  return SANE_STATUS_GOOD;
+}
+
+/* move the focus - sign bit 0x80 and magnitude */
+static SANE_Status
+film_set_focus (Avision_Scanner* s, int position)
+{
+  struct {
+    struct command_send cmd;
+    uint8_t data[8];
+  } scmd;
+  SANE_Status status;
+
+  DBG (3, "film_set_focus: %d\n", position);
+
+  memset (&scmd, 0, sizeof (scmd));
+  scmd.cmd.opc = AVISION_SCSI_SEND;
+  scmd.cmd.datatypecode = 0x88; /* focus position */
+  set_triple (scmd.cmd.transferlen, sizeof (scmd.data));
+  scmd.data[0] = (uint8_t) (position < 0 ? 0x80 : 0);
+  scmd.data[1] = (uint8_t) (position < 0 ? -position : position);
+
+  status = avision_cmd (&s->av_con, &scmd.cmd, sizeof (scmd.cmd),
+			&scmd.data, sizeof (scmd.data), 0, 0);
+  if (status != SANE_STATUS_GOOD)
+    DBG (1, "film_set_focus: send failed (%s)\n", sane_strstatus (status));
+  else
+    s->hw->focus_position = position;
+  return status;
+}
+
+/* send dark levels and white gains for the window, binned from the
+   optical to the scan resolution */
+static SANE_Status
+film_send_shading (Avision_Scanner* s)
+{
+  Avision_Device* dev = s->hw;
+  const int pixels = s->avdimen.hw_pixels_per_line;
+  struct command_send scmd;
+  SANE_Status status = SANE_STATUS_GOOD;
+  uint8_t* dark;
+  uint8_t* gain;
+  int channel, x;
+
+  DBG (3, "film_send_shading: %d pixels from %ld at %d dpi\n",
+       pixels, s->avdimen.tlx, s->avdimen.hw_xres);
+
+  if (!s->film_white || !s->film_dark) {
+    DBG (1, "film_send_shading: no calibration data\n");
+    return SANE_STATUS_INVAL;
+  }
+
+  dark = malloc ((size_t) pixels * 3 * 2);
+  gain = malloc ((size_t) pixels * 3 * 2);
+  if (!dark || !gain) {
+    free (dark);
+    free (gain);
+    return SANE_STATUS_NO_MEM;
+  }
+
+  for (channel = 0; channel < 3; ++channel)
+    for (x = 0; x < pixels; ++x) {
+      /* optical pixels covered by this scan pixel */
+      long first = (s->avdimen.tlx + x) * dev->inquiry_optical_res /
+	s->avdimen.hw_xres;
+      long last = (s->avdimen.tlx + x + 1) * dev->inquiry_optical_res /
+	s->avdimen.hw_xres;
+      const size_t offset =
+	((size_t) channel * (size_t) pixels + (size_t) x) * 2;
+      double white_sum = 0, dark_sum = 0, d, w;
+      long i, n = 0;
+      int value;
+
+      if (last <= first)
+	last = first + 1;
+      for (i = first; i < last; ++i) {
+	long p = i < s->film_calib_pixels ? i : s->film_calib_pixels - 1;
+	white_sum += get_double ((s->film_white + (p * 3 + channel) * 2));
+	dark_sum += get_double ((s->film_dark + (p * 3 + channel) * 2));
+	++n;
+      }
+      d = dark_sum / (double) n;
+      w = white_sum / (double) n;
+
+      set_double_le ((dark + offset), (uint16_t) (d + 0.5));
+
+      /* gain 0x4000 is 1.0: the white level maps to full scale */
+      if (w - d < 1.0)
+	value = 0xffff;
+      else {
+	double g = 1073741824.0 / (w - d) + 0.5;
+	value = g > 0xffff ? 0xffff : (int) g;
+      }
+      set_double_le ((gain + offset), (uint16_t) value);
+    }
+
+  /* dark R, G, B (qualifiers 3-5), then gains R, G, B (qualifiers 0-2) */
+  for (channel = 0; channel < 6 && status == SANE_STATUS_GOOD; ++channel) {
+    int q = (channel + 3) % 6;
+    uint8_t* table = q >= 3 ? dark : gain;
+
+    memset (&scmd, 0, sizeof (scmd));
+    scmd.opc = AVISION_SCSI_SEND;
+    scmd.datatypecode = 0x82; /* download calibration data */
+    set_double (scmd.datatypequal, q);
+    set_triple (scmd.transferlen, (size_t) pixels * 2);
+
+    status = avision_cmd (&s->av_con, &scmd, sizeof (scmd),
+			  table + (size_t) (q % 3) * (size_t) pixels * 2,
+			  (size_t) pixels * 2, 0, 0);
+    if (status != SANE_STATUS_GOOD)
+      DBG (1, "film_send_shading: qualifier %d failed (%s)\n", q,
+	   sane_strstatus (status));
+  }
+
+  free (dark);
+  free (gain);
+  return status;
+}
+
 /* next was taken from the GIMP and is a bit modified ... ;-)
  * original Copyright (C) 1995 Spencer Kimball and Peter Mattis
  */
@@ -6006,6 +6348,14 @@ brightness_contrast_func (double brightness, double contrast, double value)
 	value = nvalue;
     }
   return value;
+}
+
+/* brightness, contrast and the gamma vectors only act through the gamma
+   table */
+static SANE_Bool
+gamma_table_used (Avision_Device* dev)
+{
+  return !disable_gamma_table && !(dev->hw->feature_type & AV_NO_GAMMA);
 }
 
 static SANE_Status
@@ -6636,9 +6986,22 @@ set_window (Avision_Scanner* s)
       if (dev->scanner_type == AV_FILM) {
 	/* TODO: wire to IR exposure option? */
 	cmd.window.avision.type.normal.ir_exposure_time = 100;
-	set_double (cmd.window.avision.type.normal.r_exposure_time, s->val[OPT_EXPOSURE].w);
-	set_double (cmd.window.avision.type.normal.g_exposure_time, s->val[OPT_EXPOSURE].w);
-	set_double (cmd.window.avision.type.normal.b_exposure_time, s->val[OPT_EXPOSURE].w);
+	if (dev->film_features & AV_FILM_EXPOSURE_RGB) {
+	  set_double (cmd.window.avision.type.normal.r_exposure_time,
+		      s->val[OPT_EXPOSURE_R].w);
+	  set_double (cmd.window.avision.type.normal.g_exposure_time,
+		      s->val[OPT_EXPOSURE_G].w);
+	  set_double (cmd.window.avision.type.normal.b_exposure_time,
+		      s->val[OPT_EXPOSURE_B].w);
+	}
+	else {
+	  set_double (cmd.window.avision.type.normal.r_exposure_time,
+		      s->val[OPT_EXPOSURE].w);
+	  set_double (cmd.window.avision.type.normal.g_exposure_time,
+		      s->val[OPT_EXPOSURE].w);
+	  set_double (cmd.window.avision.type.normal.b_exposure_time,
+		      s->val[OPT_EXPOSURE].w);
+	}
 
 	if (s->val[OPT_IR].w)
 	  cmd.window.avision.type.normal.bitset3 |= (1 << 0);
@@ -6646,6 +7009,14 @@ set_window (Avision_Scanner* s)
 	if (s->val[OPT_MULTISAMPLE].w)
 	  cmd.window.avision.type.normal.bitset3 |= (1 << 1);
       }
+
+      /* window constants as sent by the vendor driver, meaning unknown */
+      if (dev->film_features & AV_FILM_VENDOR_WINDOW) {
+	cmd.window.avision.type.normal.bitset2 = 0;
+	cmd.window.avision.type.normal.bitset3 |= 0x10;
+	set_double (cmd.window.descriptor.halftone, 0x007f);
+      }
+
     }
 
   /* fixed values */
@@ -7095,7 +7466,10 @@ start_scan (Avision_Scanner* s)
   cmd.transferlen = 1;
 
   /* AV610C2 in ADF preview mode does not detect the page end (...) */
-  if (s->val[OPT_PREVIEW].w == SANE_TRUE && s->hw->inquiry_asic_type != AV_ASIC_C7) {
+  /* the vendor driver of some film scanners never sets the preview bit */
+  if (s->val[OPT_PREVIEW].w == SANE_TRUE &&
+      s->hw->inquiry_asic_type != AV_ASIC_C7 &&
+      !(s->hw->film_features & AV_FILM_VENDOR_OPTIONS)) {
     SET_BIT(cmd.bitset1,6);
   }
 
@@ -7145,6 +7519,7 @@ static SANE_Status
 do_cancel (Avision_Scanner* s)
 {
   int status;
+  SANE_Bool was_scanning = s->scanning;
 
   DBG (3, "do_cancel:\n");
 
@@ -7171,6 +7546,16 @@ do_cancel (Avision_Scanner* s)
     status = release_unit (s, 1);
     if (status != SANE_STATUS_GOOD)
       DBG (1, "do_cancel: release_unit failed\n");
+  }
+
+  if (s->hw->film_features & AV_FILM_RELEASE_HOME) {
+    /* the reader releases the unit at the end of a scan itself */
+    if (was_scanning) {
+      status = release_unit (s, 0);
+      if (status != SANE_STATUS_GOOD)
+	DBG (1, "do_cancel: release_unit failed\n");
+    }
+    return SANE_STATUS_CANCELLED;
   }
 
   DBG (4, "FORCE RELEASE UNIT ON CANCEL\n");
@@ -7294,6 +7679,12 @@ init_options (Avision_Scanner* s)
   dev->y_range.max = SANE_FIX ( (int)dev->inquiry_y_ranges[s->source_mode_dim]);
   dev->y_range.quant = 0;
 
+  /* whole millimeters would cut the film frame short */
+  if (dev->film_features & AV_FILM_EXACT_FRAME) {
+    dev->x_range.max = SANE_FIX (dev->inquiry_x_ranges[s->source_mode_dim]);
+    dev->y_range.max = SANE_FIX (dev->inquiry_y_ranges[s->source_mode_dim]);
+  }
+
   /* resolution */
   s->opt[OPT_RESOLUTION].name = SANE_NAME_SCAN_RESOLUTION;
   s->opt[OPT_RESOLUTION].title = SANE_TITLE_SCAN_RESOLUTION;
@@ -7303,6 +7694,11 @@ init_options (Avision_Scanner* s)
   s->opt[OPT_RESOLUTION].constraint_type = SANE_CONSTRAINT_RANGE;
   s->opt[OPT_RESOLUTION].constraint.range = &dev->dpi_range;
   s->val[OPT_RESOLUTION].w = OPT_RESOLUTION_DEFAULT;
+  if (dev->film_features & AV_FILM_RES_800) {
+    s->opt[OPT_RESOLUTION].constraint_type = SANE_CONSTRAINT_WORD_LIST;
+    s->opt[OPT_RESOLUTION].constraint.word_list = film_res_list;
+    s->val[OPT_RESOLUTION].w = 800;
+  }
 
   /* preview */
   s->opt[OPT_PREVIEW].name = SANE_NAME_PREVIEW;
@@ -7319,7 +7715,9 @@ init_options (Avision_Scanner* s)
   s->opt[OPT_SPEED].constraint_type  = SANE_CONSTRAINT_RANGE;
   s->opt[OPT_SPEED].constraint.range = &dev->speed_range;
   s->val[OPT_SPEED].w = 0;
-  if (dev->scanner_type == AV_SHEETFEED)
+  /* the vendor driver of some film scanners only uses speed 0 */
+  if (dev->scanner_type == AV_SHEETFEED ||
+      (dev->film_features & AV_FILM_VENDOR_OPTIONS))
     s->opt[OPT_SPEED].cap |= SANE_CAP_INACTIVE;
 
   /* "Geometry" group: */
@@ -7420,7 +7818,7 @@ init_options (Avision_Scanner* s)
   s->opt[OPT_BRIGHTNESS].title = SANE_TITLE_BRIGHTNESS;
   s->opt[OPT_BRIGHTNESS].desc = SANE_DESC_BRIGHTNESS;
   s->opt[OPT_BRIGHTNESS].type = SANE_TYPE_FIXED;
-  if (disable_gamma_table)
+  if (!gamma_table_used (dev))
     s->opt[OPT_BRIGHTNESS].cap |= SANE_CAP_INACTIVE;
   s->opt[OPT_BRIGHTNESS].unit = SANE_UNIT_PERCENT;
   s->opt[OPT_BRIGHTNESS].constraint_type = SANE_CONSTRAINT_RANGE;
@@ -7432,7 +7830,7 @@ init_options (Avision_Scanner* s)
   s->opt[OPT_CONTRAST].title = SANE_TITLE_CONTRAST;
   s->opt[OPT_CONTRAST].desc = SANE_DESC_CONTRAST;
   s->opt[OPT_CONTRAST].type = SANE_TYPE_FIXED;
-  if (disable_gamma_table)
+  if (!gamma_table_used (dev))
     s->opt[OPT_CONTRAST].cap |= SANE_CAP_INACTIVE;
   s->opt[OPT_CONTRAST].unit = SANE_UNIT_PERCENT;
   s->opt[OPT_CONTRAST].constraint_type = SANE_CONSTRAINT_RANGE;
@@ -7446,7 +7844,9 @@ init_options (Avision_Scanner* s)
   s->opt[OPT_QSCAN].type   = SANE_TYPE_BOOL;
   s->opt[OPT_QSCAN].unit   = SANE_UNIT_NONE;
   s->val[OPT_QSCAN].w      = SANE_TRUE;
-  if (dev->hw->feature_type & AV_NO_QSCAN_MODE)
+  /* the vendor driver of some film scanners always scans in quality mode */
+  if ((dev->hw->feature_type & AV_NO_QSCAN_MODE) ||
+      (dev->film_features & AV_FILM_VENDOR_OPTIONS))
     s->opt[OPT_QSCAN].cap |= SANE_CAP_INACTIVE;
 
   /* Quality Calibration */
@@ -7507,7 +7907,7 @@ init_options (Avision_Scanner* s)
   s->opt[OPT_GAMMA_VECTOR_B].constraint.range = &u8_range;
   s->val[OPT_GAMMA_VECTOR_B].wa = &s->gamma_table[3][0];
 
-  if (!disable_gamma_table)
+  if (gamma_table_used (dev))
   {
     if (color_mode_is_color (s->c_mode)) {
       s->opt[OPT_GAMMA_VECTOR_R].cap &= ~SANE_CAP_INACTIVE;
@@ -7529,8 +7929,30 @@ init_options (Avision_Scanner* s)
   s->opt[OPT_EXPOSURE].constraint.range = &exposure_range;
   s->val[OPT_EXPOSURE].w = 100;
 
-  if (!dev->inquiry_exposure_control) {
+  if (!dev->inquiry_exposure_control ||
+      (dev->film_features & AV_FILM_EXPOSURE_RGB)) {
     s->opt[OPT_EXPOSURE].cap |= SANE_CAP_INACTIVE;
+  }
+
+  /* per channel exposure */
+  s->opt[OPT_EXPOSURE_R].name = SANE_NAME_SCAN_EXPOS_TIME_R;
+  s->opt[OPT_EXPOSURE_R].title = SANE_TITLE_SCAN_EXPOS_TIME_R;
+  s->opt[OPT_EXPOSURE_R].desc = SANE_DESC_SCAN_EXPOS_TIME_R;
+  s->opt[OPT_EXPOSURE_G].name = SANE_NAME_SCAN_EXPOS_TIME_G;
+  s->opt[OPT_EXPOSURE_G].title = SANE_TITLE_SCAN_EXPOS_TIME_G;
+  s->opt[OPT_EXPOSURE_G].desc = SANE_DESC_SCAN_EXPOS_TIME_G;
+  s->opt[OPT_EXPOSURE_B].name = SANE_NAME_SCAN_EXPOS_TIME_B;
+  s->opt[OPT_EXPOSURE_B].title = SANE_TITLE_SCAN_EXPOS_TIME_B;
+  s->opt[OPT_EXPOSURE_B].desc = SANE_DESC_SCAN_EXPOS_TIME_B;
+  for (i = OPT_EXPOSURE_R; i <= OPT_EXPOSURE_B; ++i) {
+    s->opt[i].type = SANE_TYPE_INT;
+    s->opt[i].unit = SANE_UNIT_NONE;
+    s->opt[i].constraint_type = SANE_CONSTRAINT_RANGE;
+    s->opt[i].constraint.range = &film_exposure_range;
+    s->val[i].w = 100;
+    if (!dev->inquiry_exposure_control ||
+	!(dev->film_features & AV_FILM_EXPOSURE_RGB))
+      s->opt[i].cap |= SANE_CAP_INACTIVE;
   }
 
   /* Multi sample */
@@ -7543,7 +7965,10 @@ init_options (Avision_Scanner* s)
 
   /* TODO: No idea how to detect, assume exposure control devices are
      new enough to support this, for now. -ReneR */
-  if (!dev->inquiry_exposure_control) {
+  /* the multi-sample line format of host calibrated film scanners is
+     not known */
+  if (!dev->inquiry_exposure_control ||
+      (dev->film_features & AV_FILM_HOST_CALIB)) {
     s->opt[OPT_MULTISAMPLE].cap |= SANE_CAP_INACTIVE;
   }
 
@@ -7557,7 +7982,9 @@ init_options (Avision_Scanner* s)
 
   /* TODO: No idea how to detect, assume exposure control devices are
      new enough to support this, for now. -ReneR */
-  if (!dev->inquiry_exposure_control) {
+  /* film scanners whose vendor driver offers no infrared */
+  if (!dev->inquiry_exposure_control ||
+      (dev->film_features & AV_FILM_VENDOR_OPTIONS)) {
     s->opt[OPT_IR].cap |= SANE_CAP_INACTIVE;
   }
 
@@ -7577,8 +8004,22 @@ init_options (Avision_Scanner* s)
   s->opt[OPT_FRAME].constraint_type = SANE_CONSTRAINT_RANGE;
   s->opt[OPT_FRAME].constraint.range = &dev->frame_range;
   s->val[OPT_FRAME].w = dev->current_frame;
-  if (dev->scanner_type != AV_FILM)
+  if (dev->scanner_type != AV_FILM ||
+      ((dev->film_features & AV_FILM_HOLDER_SENSE) &&
+       dev->holder_type == 0xff))
     s->opt[OPT_FRAME].cap |= SANE_CAP_INACTIVE;
+
+  /* film holder eject */
+  s->opt[OPT_EJECT].name = "eject";
+  s->opt[OPT_EJECT].title = SANE_I18N ("Eject");
+  s->opt[OPT_EJECT].desc = SANE_I18N ("Eject the film holder");
+  s->opt[OPT_EJECT].type = SANE_TYPE_BUTTON;
+  s->opt[OPT_EJECT].unit = SANE_UNIT_NONE;
+  s->opt[OPT_EJECT].size = 0;
+  s->opt[OPT_EJECT].constraint_type = SANE_CONSTRAINT_NONE;
+  if (!(dev->film_features & AV_FILM_HOLDER_SENSE) ||
+      dev->holder_type == 0xff)
+    s->opt[OPT_EJECT].cap |= SANE_CAP_INACTIVE;
 
   /* power save time */
   s->opt[OPT_POWER_SAVE_TIME].name = "power-save-time";
@@ -7588,7 +8029,9 @@ init_options (Avision_Scanner* s)
   s->opt[OPT_POWER_SAVE_TIME].unit = SANE_UNIT_NONE;
   s->opt[OPT_POWER_SAVE_TIME].constraint_type = SANE_CONSTRAINT_NONE;
   s->val[OPT_POWER_SAVE_TIME].w = 0;
-  if (!dev->inquiry_power_save_time)
+  /* the vendor driver of some film scanners never sets the timer */
+  if (!dev->inquiry_power_save_time ||
+      (dev->film_features & AV_FILM_VENDOR_OPTIONS))
     s->opt[OPT_POWER_SAVE_TIME].cap |= SANE_CAP_INACTIVE;
 
   /* message, like options set on the scanner, LED no. & co */
@@ -8631,8 +9074,18 @@ reader_process (void *data)
 	  exit_status =  SANE_STATUS_CANCELLED;
       }
 
+      /* some film scanners are released before going home */
+      if (dev->film_features & AV_FILM_RELEASE_HOME) {
+	status = release_unit (s, 0);
+	if (status != SANE_STATUS_GOOD)
+	  DBG (1, "reader_process: release_unit failed\n");
+      }
+
       if (dev->inquiry_new_protocol && dev->scanner_type == AV_FILM) {
 	status = object_position (s, AVISION_SCSI_OP_GO_HOME);
+	if (status == SANE_STATUS_GOOD &&
+	    (dev->film_features & AV_FILM_RELEASE_HOME))
+	  status = wait_ready (&s->av_con, 1);
 	if (status != SANE_STATUS_GOOD)
 	  DBG (1, "reader_process: object position go-home failed!\n");
       }
@@ -8642,7 +9095,7 @@ reader_process (void *data)
          releases the device without ejecting. */
       if (is_adf_scan (s) && (dev->hw->feature_type & AV_MULTI_SHEET_SCAN))
         status = release_unit (s, 1);
-      else
+      else if (!(dev->film_features & AV_FILM_RELEASE_HOME))
         status = release_unit (s, 0);
       if (status != SANE_STATUS_GOOD)
 	DBG (1, "reader_process: release_unit failed\n");
@@ -8935,6 +9388,7 @@ sane_exit (void)
 
   free(devlist);
   devlist = NULL;
+
 }
 
 SANE_Status
@@ -8963,6 +9417,55 @@ sane_get_devices (const SANE_Device*** device_list, SANE_Bool local_only)
 
   *device_list = devlist;
   return SANE_STATUS_GOOD;
+}
+
+/* film calibration: light on, full resolution 16-bit window, shading and
+   focus - this also moves a loaded holder to a known position */
+static SANE_Status
+film_calibrate (Avision_Scanner* s)
+{
+  SANE_Word resolution = s->val[OPT_RESOLUTION].w;
+  color_mode mode = s->c_mode;
+  SANE_Word geometry[4], exposure[3];
+  SANE_Status status;
+  int i;
+
+  /* the calibration data is read in the 16-bit color format, for the
+     whole frame at the optical resolution and always at exposure 100;
+     the built-in firmware only lights the lamp after a line read */
+  for (i = 0; i < 4; ++i)
+    geometry[i] = s->val[OPT_TL_X + i].w;
+  for (i = 0; i < 3; ++i) {
+    exposure[i] = s->val[OPT_EXPOSURE_R + i].w;
+    s->val[OPT_EXPOSURE_R + i].w = 100;
+  }
+  s->val[OPT_RESOLUTION].w = s->hw->inquiry_optical_res;
+  s->c_mode = AV_TRUECOLOR16;
+  s->val[OPT_TL_X].w = 0;
+  s->val[OPT_TL_Y].w = 0;
+  s->val[OPT_BR_X].w = s->hw->x_range.max;
+  s->val[OPT_BR_Y].w = s->hw->y_range.max;
+  compute_parameters (s);
+
+  status = film_light_on (s);
+  if (status == SANE_STATUS_GOOD)
+    status = set_window (s);
+
+  s->val[OPT_RESOLUTION].w = resolution;
+  s->c_mode = mode;
+  for (i = 0; i < 4; ++i)
+    s->val[OPT_TL_X + i].w = geometry[i];
+  for (i = 0; i < 3; ++i)
+    s->val[OPT_EXPOSURE_R + i].w = exposure[i];
+
+  /* goes home between white and dark itself */
+  if (status == SANE_STATUS_GOOD)
+    status = film_read_shading (s);
+  if (status == SANE_STATUS_GOOD)
+    status = film_set_focus (s, 0);
+
+  compute_parameters (s);
+  return status;
 }
 
 SANE_Status
@@ -9111,6 +9614,17 @@ sane_open (SANE_String_Const devicename, SANE_Handle *handle)
     close(fd);
   }
 
+  /* host calibration works with or without a film holder */
+  if (dev->film_features & AV_FILM_HOST_CALIB)
+    {
+      DBG (1, "sane_open: early calibration for film scanner.\n");
+      status = film_calibrate (s);
+      if (status != SANE_STATUS_GOOD)
+	DBG (1, "sane_open: film calibration failed: %s\n",
+	     sane_strstatus (status));
+      return status;
+    }
+
   /* calibrate film scanners, as this must be done without the
      film holder and at the full resolution */
   if (dev->scanner_type == AV_FILM)
@@ -9195,6 +9709,8 @@ sane_close (SANE_Handle handle)
     free (s->white_avg_data);
   if (s->dark_avg_data)
     free (s->dark_avg_data);
+  free (s->film_white);
+  free (s->film_dark);
 
   if (s->background_raster)
     free (s->background_raster);
@@ -9272,6 +9788,9 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
 	case OPT_BRIGHTNESS:
 	case OPT_CONTRAST:
 	case OPT_EXPOSURE:
+	case OPT_EXPOSURE_R:
+	case OPT_EXPOSURE_G:
+	case OPT_EXPOSURE_B:
 	case OPT_IR:
 	case OPT_MULTISAMPLE:
 	case OPT_QSCAN:
@@ -9362,6 +9881,9 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
 	case OPT_BRIGHTNESS:
 	case OPT_CONTRAST:
 	case OPT_EXPOSURE:
+	case OPT_EXPOSURE_R:
+	case OPT_EXPOSURE_G:
+	case OPT_EXPOSURE_B:
 	case OPT_IR:
 	case OPT_MULTISAMPLE:
 	case OPT_QSCAN:
@@ -9434,7 +9956,7 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
 	    /* set to mode specific values */
 
 	    /* the gamma table related */
-	    if (!disable_gamma_table)
+	    if (gamma_table_used (dev))
 	      {
 		if (color_mode_is_color (s->c_mode) ) {
 		  s->opt[OPT_GAMMA_VECTOR].cap   |= SANE_CAP_INACTIVE;
@@ -9457,12 +9979,30 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
 	case OPT_FRAME:
 	  {
 	    SANE_Word frame = *((SANE_Word  *) val);
+	    SANE_Int frame_cap = s->opt[OPT_FRAME].cap;
 
 	    status = set_frame (s, frame);
 	    if (status == SANE_STATUS_GOOD) {
 	      s->val[OPT_FRAME].w = frame;
 	      dev->current_frame = frame;
 	    }
+	    /* the holder may have been ejected meanwhile */
+	    if (info && s->opt[OPT_FRAME].cap != frame_cap)
+	      *info |= SANE_INFO_RELOAD_OPTIONS;
+	    return status;
+	  }
+	case OPT_EJECT:
+	  {
+	    /* frame 0xff ejects the holder */
+	    status = set_frame (s, 0xff);
+	    if (status != SANE_STATUS_GOOD)
+	      return status;
+
+	    status = get_frame_info (s);
+	    if (status == SANE_STATUS_GOOD)
+	      s->val[OPT_FRAME].w = dev->current_frame;
+	    if (info)
+	      *info |= SANE_INFO_RELOAD_OPTIONS;
 	    return status;
 	  }
 	case OPT_POWER_SAVE_TIME:
@@ -9533,6 +10073,7 @@ sane_start (SANE_Handle handle)
   /* Clear cancellation status */
   s->cancelled = SANE_FALSE;
 
+
   /* Make sure we have a current parameter set. Some of the
      parameters will be overwritten below, but that's OK. */
   status = sane_get_parameters (s, &s->params);
@@ -9561,6 +10102,31 @@ sane_start (SANE_Handle handle)
     }
     else
       DBG (1, "sane_start: media_check ok\n");
+  }
+
+  /* the film holder may have changed since it was last sensed */
+  if (dev->film_features & AV_FILM_HOLDER_SENSE) {
+    SANE_Bool was_empty = dev->holder_type == 0xff;
+
+    status = get_frame_info (s);
+    if (status != SANE_STATUS_GOOD)
+      return status;
+    if (dev->holder_type == 0xff) {
+      DBG (1, "sane_start: no film holder!\n");
+      return SANE_STATUS_NO_DOCS;
+    }
+    /* a newly inserted holder is at no known position until calibrated */
+    if (was_empty && (dev->film_features & AV_FILM_HOST_CALIB)) {
+      DBG (1, "sane_start: new film holder, calibrating again\n");
+      status = film_calibrate (s);
+      if (status != SANE_STATUS_GOOD)
+	return status;
+    }
+    /* select the frame before every scan */
+    status = set_frame (s, s->val[OPT_FRAME].w);
+    if (status != SANE_STATUS_GOOD)
+      return status;
+    dev->current_frame = s->val[OPT_FRAME].w;
   }
 
   /* Check the light early, to return to the GUI and notify the user. */
@@ -9672,6 +10238,15 @@ sane_start (SANE_Handle handle)
   }
 
  calib_end:
+
+  if (dev->film_features & AV_FILM_HOST_CALIB) {
+    status = film_send_shading (s);
+    if (status != SANE_STATUS_GOOD) {
+      DBG (1, "sane_start: send film shading failed: %s\n",
+	   sane_strstatus (status));
+      goto stop_scanner_and_return;
+    }
+  }
 
   if (dev->inquiry_3x3_matrix && dev->inquiry_asic_type >= AV_ASIC_C6 &&
       s->page == 0)

@@ -338,6 +338,10 @@ typedef struct Avision_HWEntry {
      returns full-range 16-bit samples. (Konica Minolta Dimage Scan Dual IV.) */
   #define AV_WINDOW_BPC_12 ((uint64_t)1<<52)
 
+  /* Konica Minolta Dimage Scan Dual IV: selects the film behavior flags
+     AV_FILM_* below, see film_features in Avision_Device. */
+  #define AV_MINOLTA_DUAL_IV ((uint64_t)1<<53)
+
     /* maybe more ...*/
   uint64_t feature_type;
 
@@ -428,11 +432,15 @@ enum Avision_Option
   OPT_GAMMA_VECTOR_B,
 
   OPT_EXPOSURE,          /* film exposure adjustment */
+  OPT_EXPOSURE_R,        /* per channel film exposure */
+  OPT_EXPOSURE_G,
+  OPT_EXPOSURE_B,
   OPT_IR,                /* infra-red */
   OPT_MULTISAMPLE,       /* multi-sample */
 
   OPT_MISC_GROUP,
   OPT_FRAME,             /* Film holder control */
+  OPT_EJECT,             /* eject the film holder */
 
   OPT_POWER_SAVE_TIME,   /* set power save time to the scanner */
 
@@ -582,6 +590,44 @@ typedef struct Avision_Device
   SANE_Range frame_range;
   SANE_Word current_frame;
   SANE_Word holder_type;
+  SANE_Word focus_position; /* last position sent to the focus motor */
+
+  /* film scanner behavior, set in attach () from the model's feature_type,
+     0 for all other devices */
+  uint32_t film_features;
+
+    /* calibrated on the host: white and dark are read at open and when a
+       film holder is inserted, and dark levels and gains are sent for
+       every scan window (SEND 0x82 qualifiers 3-5, 0-2) */
+  #define AV_FILM_HOST_CALIB ((uint32_t)1<<0)
+
+    /* separate red, green and blue exposure times in the window,
+       instead of one exposure option */
+  #define AV_FILM_EXPOSURE_RGB ((uint32_t)1<<1)
+
+    /* the holder is sensed and the frame selected before every scan; the
+       holder can be ejected; frame and eject need a holder */
+  #define AV_FILM_HOLDER_SENSE ((uint32_t)1<<2)
+
+    /* the scan area is the film frame of the inquiry exactly, rounded to
+       whole pixels */
+  #define AV_FILM_EXACT_FRAME ((uint32_t)1<<3)
+
+    /* at the end of a scan: release, go home, wait until ready */
+  #define AV_FILM_RELEASE_HOME ((uint32_t)1<<4)
+
+    /* scans only at 800, 1600 and 3200 dpi windows, other resolutions are
+       scaled from these */
+  #define AV_FILM_RES_800 ((uint32_t)1<<5)
+
+    /* settings the vendor driver never uses are not offered: speed,
+       infrared, power save time, quality scan off, the preview bit and
+       8-bit color */
+  #define AV_FILM_VENDOR_OPTIONS ((uint32_t)1<<6)
+
+    /* window bitset2 0, bitset3 bit 4 and halftone 0x007f as the vendor
+       driver sends them, meaning unknown */
+  #define AV_FILM_VENDOR_WINDOW ((uint32_t)1<<7)
 
   /* some version corrections */
   uint16_t data_dq; /* was ox0A0D - but hangs some new scanners */
@@ -606,6 +652,12 @@ typedef struct Avision_Scanner
      calibration :-( */
   uint8_t* dark_avg_data;
   uint8_t* white_avg_data;
+
+  /* film shading: white and dark line averages at the optical resolution,
+     pixel-interleaved RGB, as returned by sort_and_average () */
+  uint8_t* film_white;
+  uint8_t* film_dark;
+  int film_calib_pixels;
 
   /* background raster data, if duplex first front, then rear */
   uint8_t* background_raster;
