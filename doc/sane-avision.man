@@ -109,6 +109,16 @@ Focuses on the center of the frame before every scan, which takes several
 seconds, and sets
 .B \-\-focus
 to the position found (Konica Minolta Dimage Scan Dual IV).
+.TP
+.BR \-\-ae ", " \-\-ae\-wb
+Prescans the whole frame at 800 dpi before every scan and sets the scan
+exposure times so that the brightest part of the film comes near full scale:
+.B \-\-ae
+with one exposure for all colors (slides),
+.B \-\-ae\-wb
+with one for each color, which also removes the orange mask of color
+negatives (Konica Minolta Dimage Scan Dual IV). The exposures found are kept
+in the exposure time options.
 
 .SH "DEVICE NAMES"
 This backend expects device names of the form:
