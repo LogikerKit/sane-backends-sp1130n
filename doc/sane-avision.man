@@ -85,6 +85,21 @@ of the backend. Please report the need of
 options to the backend-author so the backend can
 be fixed as soon as possible.
 
+.SH "SCANNER OPTIONS"
+Most options are the standard SANE options. Some film scanners add:
+.TP
+.B \-\-frame
+Selects the frame of the film holder to scan.
+.TP
+.B \-\-eject
+Ejects the film holder (Konica Minolta Dimage Scan Dual IV).
+.TP
+.BR \-\-scan\-exposure\-time\-r ", " \-\-scan\-exposure\-time\-g ", " \
+\-\-scan\-exposure\-time\-b
+Exposure time for each color, from 54 to 2033; 100 is the exposure used
+for calibration (Konica Minolta Dimage Scan Dual IV). Color negatives need much
+longer exposures, with a shorter one for red.
+
 .SH "DEVICE NAMES"
 This backend expects device names of the form:
 .PP
