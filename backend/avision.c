@@ -143,6 +143,7 @@
 #include "../include/sane/sanei_config.h"
 #include "../include/sane/sanei_backend.h"
 
+#include "../include/md5.h"
 
 #include <avision.h>
 
@@ -1676,6 +1677,17 @@ static SANE_Bool disable_gamma_table = SANE_FALSE;
 /* disable the calibration */
 static SANE_Bool disable_calibration = SANE_FALSE;
 static SANE_Bool force_calibration = SANE_FALSE;
+
+/* firmware file to upload, set by "option firmware" */
+static char* firmware_file = NULL;
+
+/* MD5 of the only firmware known to work (51842 bytes, as sent by the
+   vendor driver); other files are not uploaded */
+static const uint8_t known_firmware_md5[16] =
+  {
+    0xb9, 0x7a, 0x08, 0x1e, 0x77, 0xc6, 0x67, 0xf4,
+    0x2a, 0x78, 0xe2, 0x49, 0xe9, 0x4d, 0xe5, 0x58
+  };
 
 /* force scanable areas to ISO(DIN) A4/A3 */
 static SANE_Bool force_a4 = SANE_FALSE;
@@ -3551,7 +3563,8 @@ set_power_save_time (Avision_Scanner* s, int time)
 }
 
 static SANE_Status
-get_firmware_status (Avision_Connection* av_con)
+get_firmware_status (Avision_Connection* av_con, int data_dq,
+		     uint8_t* download_firmware)
 {
   /* read stuff */
   struct command_read rcmd;
@@ -3568,7 +3581,7 @@ get_firmware_status (Avision_Connection* av_con)
   rcmd.opc = AVISION_SCSI_READ;
 
   rcmd.datatypecode = AVISION_DATATYPECODE_FIRMWARE_STATUS; /* firmware status */
-  set_double (rcmd.datatypequal, 0); /* dev->data_dq not available */
+  set_double (rcmd.datatypequal, data_dq); /* 0 if not yet known */
   set_triple (rcmd.transferlen, size);
 
   status = avision_cmd (av_con, &rcmd, sizeof (rcmd), 0, 0, &result, &size);
@@ -3586,7 +3599,98 @@ get_firmware_status (Avision_Connection* av_con)
   DBG (3, "get_firmware_status: [3]  side edge: %d\n", get_double ( result.first_effective_pixel_adf_front ));
   DBG (3, "get_firmware_status: [5]  side edge: %d\n", get_double ( result.first_effective_pixel_adf_rear ));
 
+  if (download_firmware)
+    *download_firmware = result.download_firmware;
+
   return SANE_STATUS_GOOD;
+}
+
+/* read a firmware file - NULL if it cannot be read or is not the known
+   firmware */
+static uint8_t*
+read_firmware_file (const char* file, size_t* size)
+{
+  uint8_t digest[16];
+  uint8_t* data;
+  long length;
+  FILE* f;
+
+  f = fopen (file, "rb");
+  if (!f) {
+    DBG (0, "read_firmware_file: cannot open %s: %s\n", file,
+	 strerror (errno));
+    return NULL;
+  }
+  if (fseek (f, 0, SEEK_END) != 0 || (length = ftell (f)) <= 0 ||
+      length > 0xffffff || fseek (f, 0, SEEK_SET) != 0) {
+    DBG (0, "read_firmware_file: %s has no usable size\n", file);
+    fclose (f);
+    return NULL;
+  }
+  data = malloc ((size_t) length);
+  if (!data || fread (data, 1, (size_t) length, f) != (size_t) length) {
+    DBG (0, "read_firmware_file: cannot read %s\n", file);
+    free (data);
+    fclose (f);
+    return NULL;
+  }
+  fclose (f);
+
+  md5_buffer ((const char*) data, (size_t) length, digest);
+  if (memcmp (digest, known_firmware_md5, sizeof (digest)) != 0) {
+    DBG (0, "read_firmware_file: %s is not a known firmware for this "
+	 "scanner\n", file);
+    free (data);
+    return NULL;
+  }
+
+  *size = (size_t) length;
+  return data;
+}
+
+/* upload the firmware and wait until the device is ready */
+static SANE_Status
+upload_firmware (Avision_Connection* av_con, uint8_t* data, size_t size)
+{
+  struct command_send scmd;
+  SANE_Status status;
+
+  DBG (1, "upload_firmware: sending %zu bytes\n", size);
+  memset (&scmd, 0, sizeof (scmd));
+  scmd.opc = AVISION_SCSI_SEND;
+  scmd.datatypecode = AVISION_DATATYPECODE_FIRMWARE_STATUS; /* firmware */
+  set_triple (scmd.transferlen, size);
+  status = avision_cmd (av_con, &scmd, sizeof (scmd), data, size, 0, 0);
+  if (status != SANE_STATUS_GOOD) {
+    DBG (0, "upload_firmware: send failed (%s)\n", sane_strstatus (status));
+    return status;
+  }
+  return wait_ready (av_con, 1);
+}
+
+/* the device asks for a firmware download on the first firmware status
+   read after power-on only - upload the configured file then */
+static SANE_Status
+check_firmware (Avision_Connection* av_con, int data_dq)
+{
+  uint8_t download_firmware;
+  uint8_t* data = NULL;
+  size_t fw_size = 0;
+  SANE_Status status;
+
+  status = get_firmware_status (av_con, data_dq, &download_firmware);
+  if (status != SANE_STATUS_GOOD || download_firmware == 0)
+    return status;
+
+  if (firmware_file)
+    data = read_firmware_file (firmware_file, &fw_size);
+  if (!data) {
+    DBG (1, "check_firmware: using the built-in firmware\n");
+    return SANE_STATUS_GOOD;
+  }
+  status = upload_firmware (av_con, data, fw_size);
+  free (data);
+  return status;
 }
 
 static SANE_Status
@@ -4658,7 +4762,7 @@ attach (SANE_String_Const devname, Avision_ConnectionType con_type,
   if (Avision_Device_List [model_num].feature_type & AV_FIRMWARE)
   {
       DBG (3, "attach: reading firmware status\n");
-      status = get_firmware_status (&av_con);
+      status = get_firmware_status (&av_con, 0, NULL);
       if (status != SANE_STATUS_GOOD) {
 	DBG (1, "attach: get firmware status failed (%s)\n",
 	     sane_strstatus (status));
@@ -4703,7 +4807,7 @@ attach (SANE_String_Const devname, Avision_ConnectionType con_type,
     dev->film_features = AV_FILM_HOST_CALIB | AV_FILM_EXPOSURE_RGB |
       AV_FILM_HOLDER_SENSE | AV_FILM_EXACT_FRAME | AV_FILM_RELEASE_HOME |
       AV_FILM_RES_800 | AV_FILM_VENDOR_OPTIONS | AV_FILM_VENDOR_WINDOW |
-      AV_FILM_FOCUS | AV_FILM_MULTI_SAMPLE_X2;
+      AV_FILM_FOCUS | AV_FILM_MULTI_SAMPLE_X2 | AV_FILM_FIRMWARE;
 
   dev->sane.name   = strdup (devname);
   dev->sane.vendor = dev->hw->real_mfg   ? dev->hw->real_mfg   : strdup (mfg);
@@ -9443,6 +9547,17 @@ sane_reload_devices (void)
 		     linenumber);
 		force_calibration = SANE_TRUE;
 	      }
+	      else if (strcmp (word, "firmware") == 0) {
+		free (word);
+		word = NULL;
+		cp = sanei_config_get_string (cp, &word);
+		if (word) {
+		  DBG (3, "sane_reload_devices: config file line %d: "
+		       "firmware %s\n", linenumber, word);
+		  free (firmware_file);
+		  firmware_file = strdup (word);
+		}
+	      }
 	      else if (strcmp (word, "force-a4") == 0) {
 		DBG (3, "sane_reload_devices: config file line %d: enabling force-a4\n",
 		     linenumber);
@@ -9588,6 +9703,8 @@ sane_exit (void)
   free(devlist);
   devlist = NULL;
 
+  free (firmware_file);
+  firmware_file = NULL;
 }
 
 SANE_Status
@@ -10179,6 +10296,12 @@ sane_open (SANE_String_Const devicename, SANE_Handle *handle)
   if (status != SANE_STATUS_GOOD) {
 	DBG (1, "sane_open: awakening inquiry failed: %s\n", sane_strstatus (status));
 	return status;
+  }
+
+  if (dev->film_features & AV_FILM_FIRMWARE) {
+    status = check_firmware (&s->av_con, dev->data_dq);
+    if (status != SANE_STATUS_GOOD)
+      return status;
   }
 
   status = wait_ready (&s->av_con, 1);

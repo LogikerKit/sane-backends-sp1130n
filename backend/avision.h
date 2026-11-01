@@ -640,6 +640,9 @@ typedef struct Avision_Device
        the window, every shading table twice, twice the lines to read */
   #define AV_FILM_MULTI_SAMPLE_X2 ((uint32_t)1<<9)
 
+    /* runs with its built-in firmware; a newer one may be uploaded */
+  #define AV_FILM_FIRMWARE ((uint32_t)1<<10)
+
   /* some version corrections */
   uint16_t data_dq; /* was ox0A0D - but hangs some new scanners */
 
