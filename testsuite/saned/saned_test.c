@@ -165,8 +165,10 @@ test_check_v4_in_range_case (const char *name, const char *peer_ip,
 			     const char *base_ip, const char *netmask,
 			     SANE_Bool expected)
 {
-  struct sockaddr_in sin;
   SANE_Bool ret;
+
+#ifdef SANED_USES_AF_INDEP
+  struct sockaddr_in sin;
 
   memset (&sin, 0, sizeof (sin));
   sin.sin_family = AF_INET;
@@ -178,6 +180,19 @@ test_check_v4_in_range_case (const char *name, const char *peer_ip,
     }
 
   ret = check_v4_in_range (&sin, (char *) base_ip, (char *) netmask);
+#else /* !SANED_USES_AF_INDEP */
+  struct in_addr peer, base;
+
+  if (inet_pton (AF_INET, peer_ip, &peer) != 1
+      || inet_pton (AF_INET, base_ip, &base) != 1)
+    {
+      fprintf (stderr, "%s: bad address %s/%s\n", name, base_ip, peer_ip);
+      failures++;
+      return;
+    }
+
+  ret = check_v4_in_range (&peer, &base, (char *) netmask);
+#endif /* SANED_USES_AF_INDEP */
 
   if (ret != expected)
     {

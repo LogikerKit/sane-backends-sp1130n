@@ -3106,7 +3106,10 @@ do_bindings (void)
     sin.sin_addr.s_addr = inet_addr(bind_addr);
   else
     sin.sin_addr.s_addr = INADDR_ANY;
-  sin.sin_port = port;
+  if (bind_port >= 0)
+    sin.sin_port = htons (bind_port);
+  else
+    sin.sin_port = port;
 
   DBG (DBG_DBG, "do_bindings: socket ()\n");
   fd = socket (AF_INET, SOCK_STREAM, 0);
@@ -3134,6 +3137,9 @@ do_bindings (void)
     if (getsockname(fd, (struct sockaddr *) &sin, &len) != -1)
       bound_port = ntohs (sin.sin_port);
   }
+
+  if (bind_port == 0)
+    DBG (DBG_INFO, "do_bindings: selected ephemeral port: %d\n", bound_port);
 
   add_fd(fd, SANED_FD_LISTENER, POLLIN);
 }
