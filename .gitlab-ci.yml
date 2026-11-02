@@ -99,6 +99,17 @@ debian-12-none:
     MAKE_FLAGS: "CFLAGS=-Werror CXXFLAGS=-Werror"
   <<: *compile_definition
 
+# Checks that the build and the test suite work with IPv6 support
+# disabled, i.e. with the legacy IPv4-only code paths compiled.
+
+debian-12-noipv6:
+  image: $REGISTRY_HUB:debian-bookworm-full
+  variables:
+    CONFIGURE_OPTS: "$CONFIGURE_MINI $CONFIGURE_FULL --disable-ipv6"
+    MAKE_FLAGS: "CFLAGS=-Werror CXXFLAGS=-Werror"
+    RUN_TESTS: "yes"
+  <<: *compile_definition
+
 fedora-39-clang:
   image: $REGISTRY_HUB:fedora-39-clang
   variables:
