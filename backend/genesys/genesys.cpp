@@ -1901,6 +1901,11 @@ void scanner_coarse_gain_calibration(Genesys_Device& dev, const Genesys_Sensor& 
             std::sort(values.begin(), values.end());
             curr_output = static_cast<float>(values[unsigned((values.size() - 1) * 0.95)]);
             target_value = calib_sensor->gain_white_ref * coeff;
+            if (dev.model->asic_type == AsicType::GL841 && dev.model->is_sheetfed) {
+                // gl841 scans with 16 bit depth here (see session.params.depth above), but
+                // gain_white_ref is an 8 bit value
+                target_value = 65535.0f * coeff;
+            }
 
         } else {
             // FIXME: use the GL843 approach
