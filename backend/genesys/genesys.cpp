@@ -6136,6 +6136,16 @@ static void set_option_value(Genesys_Scanner* s, int option, void *val, SANE_Int
             break;
         }
         case OPT_CALIBRATE: {
+            // the cache file is otherwise only set up in sane_start()
+            if (dev->force_calibration == 0 && dev->calib_file.empty()) {
+                auto path = calibration_filename(dev);
+                s->calibration_file = path;
+                dev->calib_file = path;
+                catch_all_exceptions(__func__, [&]()
+                {
+                    sanei_genesys_read_calibration(dev->calibration_cache, dev->calib_file);
+                });
+            }
             auto& sensor = sanei_genesys_find_sensor_for_write(dev, dev->settings.xres,
                                                                dev->settings.get_channels(),
                                                                dev->settings.scan_method);
