@@ -2157,11 +2157,17 @@ SensorExposure scanner_led_calibration(Genesys_Device& dev, const Genesys_Sensor
                 // we accept +- 2% delta from target
                 if (std::abs(avg[i] - target) > target / 50) {
                     float prev_weight = 0.5;
+                    float new_exp = 0;
                     if (avg[i] != 0) {
-                        exp[i] = exp[i] * prev_weight + ((exp[i] * target) / avg[i]) * (1 - prev_weight);
+                        new_exp = exp[i] * prev_weight +
+                                  ((static_cast<float>(exp[i]) * target) / avg[i]) *
+                                  (1 - prev_weight);
                     } else {
-                        exp[i] = exp[i] * prev_weight + (exp[i] * 10) * (1 - prev_weight);
+                        new_exp = exp[i] * prev_weight + (exp[i] * 10.0f) * (1 - prev_weight);
                     }
+                    // assigning an out of range value to std::uint16_t would wrap around
+                    new_exp = std::min(std::max(new_exp, 1.0f), 65535.0f);
+                    exp[i] = static_cast<std::uint16_t>(new_exp);
                     acceptable = false;
                 }
             }
