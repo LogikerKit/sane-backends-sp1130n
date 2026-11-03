@@ -3770,7 +3770,15 @@ static void genesys_sheetfed_calibration(Genesys_Device* dev, Genesys_Sensor& se
     {
         // ADC now sends correct data, we can configure the exposure for the LEDs
         dev->interface->record_progress_message("led_calibration");
-        dev->cmd_set->led_calibration(dev, sensor, local_reg);
+        auto calib_exposure = dev->cmd_set->led_calibration(dev, sensor, local_reg);
+        if (dev->model->asic_type == AsicType::GL841) {
+            // store the result in the same way as genesys_flatbed_calibration() does
+            for (auto& sensor_update :
+                    sanei_genesys_find_sensors_all_for_write(dev, sensor.method)) {
+                sensor_update.get().exposure = calib_exposure;
+            }
+            sensor.exposure = calib_exposure;
+        }
 
         if (!has_flag(dev->model->flags, ModelFlag::DISABLE_ADC_CALIBRATION)) {
             // recalibrate ADC again for the new LED exposure
