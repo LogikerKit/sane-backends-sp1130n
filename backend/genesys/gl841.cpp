@@ -1527,8 +1527,13 @@ void CommandSetGl841::init_regs_for_shading(Genesys_Device* dev, const Genesys_S
     const auto& calib_sensor = sanei_genesys_find_sensor(dev, resolution, channels,
                                                          dev->settings.scan_method);
 
+    float calib_size_mm = dev->model->y_size_calib_dark_white_mm;
+    if (calib_size_mm <= 0 && dev->model->is_sheetfed) {
+        // sheetfed models don't define a separate dark/white calibration area
+        calib_size_mm = dev->model->y_size_calib_mm;
+    }
     unsigned calib_lines =
-            static_cast<unsigned>(dev->model->y_size_calib_dark_white_mm * resolution / MM_PER_INCH);
+            static_cast<unsigned>(calib_size_mm * resolution / MM_PER_INCH);
     unsigned starty =
             static_cast<unsigned>(dev->model->y_offset_calib_dark_white_mm * dev->motor.base_ydpi / MM_PER_INCH);
     ScanSession session;
