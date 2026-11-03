@@ -735,6 +735,28 @@ void scanner_stop_action_no_move(Genesys_Device& dev, genesys::Genesys_Register_
     // same across all supported ASICs
     dev.interface->write_register(0x01, regs.get8(0x01));
 
+    if (dev.model->asic_type == AsicType::GL841 && dev.model->is_sheetfed) {
+        // Clearing the SCAN bit is not enough to stop the motor on gl841 sheetfed scanners: it
+        // keeps feeding. Turn the motor off and shorten the feed in the same way as
+        // gl841_init_motor_regs_off() does.
+        std::uint8_t reg02 = regs.get8(gl841::REG_0x02);
+        reg02 &= ~(gl841::REG_0x02_NOTHOME | gl841::REG_0x02_ACDCDIS | gl841::REG_0x02_AGOHOME |
+                   gl841::REG_0x02_MTRPWR | gl841::REG_0x02_FASTFED | gl841::REG_0x02_MTRREV |
+                   gl841::REG_0x02_HOMENEG | gl841::REG_0x02_LONGCURV);
+        dev.interface->write_register(gl841::REG_0x02, reg02);
+
+        const std::pair<std::uint16_t, std::uint8_t> motor_off_regs[] = {
+            { gl841::REG_STEPNO, 0 }, { gl841::REG_FASTNO, 0 },
+            { 0x25, 0 }, { 0x26, 0 }, { 0x27, 0 },
+            { 0x3d, 0 }, { 0x3e, 0 }, { 0x3f, 2 },
+            { 0x5e, static_cast<std::uint8_t>(regs.get8(0x5e) & ~0xe0) }, { 0x5f, 0 },
+            { 0x67, 0x3f }, { 0x68, 0x3f }, { 0x69, 0 }, { 0x6a, 0 },
+        };
+        for (const auto& reg : motor_off_regs) {
+            dev.interface->write_register(reg.first, reg.second);
+        }
+    }
+
     // looks like certain scanners lock up if we try to scan immediately after stopping previous
     // action.
     dev.interface->sleep_ms(100);
