@@ -2074,6 +2074,19 @@ SensorExposure scanner_led_calibration(Genesys_Device& dev, const Genesys_Sensor
     for (unsigned i_test = 0; i_test < 100 && !acceptable; ++i_test) {
         regs_set_exposure(dev.model->asic_type, regs, { exp[0], exp[1], exp[2] });
 
+        if (dev.model->asic_type == AsicType::GL841 && dev.model->is_sheetfed) {
+            // The LED on-time is limited by the line period, which was computed from the
+            // initial exposure. Make sure it covers the current exposure, otherwise the LED
+            // on-time is clipped and the measured brightness stops responding.
+            unsigned needed = std::max({ exp[0], exp[1], exp[2] }) + regs.get8(0x19);
+            needed = std::min(needed, 65535u);
+            if (regs.get16(0x38) < needed) {
+                DBG(DBG_info, "%s: widening line period %d -> %u for exposure\n", __func__,
+                    regs.get16(0x38), needed);
+                regs.set16(0x38, static_cast<std::uint16_t>(needed));
+            }
+        }
+
         dev.interface->write_registers(regs);
 
         dbg.log(DBG_info, "starting line reading");
