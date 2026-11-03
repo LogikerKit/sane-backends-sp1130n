@@ -611,6 +611,49 @@ FILTERED_BACKENDS=""
 for be in ${BACKENDS}; do
   backend_supported="yes"
   case $be in
+    sp1130n)
+    case "$host_os" in
+      linux*) ;;
+      *)
+      echo "*** $be backend currently requires Linux - $DISABLE_MSG"
+      backend_supported="no"
+      ;;
+    esac
+    if test "${have_libusb1}" != "yes" \
+      || test "${sane_cv_use_libjpeg}" != "yes" \
+      || test "${have_pthread}" != "yes"; then
+      echo "*** $be requires libusb-1.0, JPEG and pthread - $DISABLE_MSG"
+      backend_supported="no"
+    fi
+    AC_CACHE_CHECK([for SP-1130N lock-free C11 atomics],
+      [sane_cv_sp1130n_cflags],
+      [sane_cv_sp1130n_cflags=unsupported
+       sane_sp1130n_save_CFLAGS="$CFLAGS"
+       for sane_sp1130n_flag in none -std=c11; do
+         AS_IF([test "$sane_sp1130n_flag" = none],
+           [CFLAGS="$sane_sp1130n_save_CFLAGS"],
+           [CFLAGS="$sane_sp1130n_flag $sane_sp1130n_save_CFLAGS"])
+         AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+#include <stdatomic.h>
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L
+#error C11 is required
+#endif
+_Static_assert(ATOMIC_POINTER_LOCK_FREE == 2 && ATOMIC_BOOL_LOCK_FREE == 2,
+               "lock-free signal cancellation is required");
+int main(void) { atomic_bool value = 0; return atomic_load(&value); }
+]])], [sane_cv_sp1130n_cflags="$sane_sp1130n_flag"; break])
+       done
+       CFLAGS="$sane_sp1130n_save_CFLAGS"])
+    case "$sane_cv_sp1130n_cflags" in
+      none) ;;
+      unsupported)
+        echo "*** $be requires lock-free C11 atomics - $DISABLE_MSG"
+        backend_supported="no"
+        ;;
+      *) SP1130N_CFLAGS="$sane_cv_sp1130n_cflags" ;;
+    esac
+    ;;
+
     plustek_pp)
     case "$host_os" in
       gnu*)

@@ -1,0 +1,174 @@
+.TH sane-sp1130n 5 "3 November 2026" "@PACKAGEVERSION@" "SANE Scanner Access Now Easy"
+.SH NAME
+sane-sp1130n \- Ricoh/Fujitsu SP-1130N USB and native LAN backend
+.SH DESCRIPTION
+The
+.B sp1130n
+backend supports the Ricoh/Fujitsu SP-1130N over USB and native LAN.
+Duplex scanning is the default. Front-only and back-only sources are available.
+Basic hardware support has been tested on the Fujitsu-ID model; the Ricoh
+USB ID and the limitations below have not all been physically validated.
+Do not interpret synthetic test results as successful scans on real hardware.
+.PP
+For a focused build, select
+.BR "BACKENDS=sp1130n" .
+It is included in automatic backend selection when its Linux, libusb-1.0,
+JPEG, pthread and C11 dependencies are available. The default dll.conf entry
+is enabled. No vendor library or firmware is loaded.
+.SH DEVICES
+The accepted USB device IDs are Ricoh 05ca:031e and Fujitsu 04c5:1627.
+Limited physical scanning tests used the Fujitsu ID; the Ricoh ID has not
+been physically tested. Device names are
+.BR sp1130n:usb:BUS:ADDRESS .
+Use the name returned by scanimage \-L. The older non-N SP1130 and other Ricoh
+devices are not inferred compatible.
+.PP
+Native LAN is selected explicitly as
+.BR sp1130n:tcp:IPv4
+or
+.BR sp1130n:tcp:IPv4:PORT .
+The default TCP port is 16888. Only numeric unicast IPv4 is accepted.
+LAN is not enumerated, and no DNS lookup, broadcast, address change, eSCL or
+WSD discovery is performed. Reported encryption is conservatively refused.
+Plaintext transfer has no confidentiality or server authentication. Use a
+trusted network and non-sensitive, replaceable originals for initial tests.
+.SH OPTIONS
+The source is ADF Duplex, ADF Front or ADF Back. Modes are Color, Gray or
+Lineart. USB resolutions are 300 or 600 dpi; LAN is restricted to full A4 at
+300 dpi with front/back output selected on the host. Duplex buffers both sides after one
+sheet acquisition and returns the front image followed by the back image.
+A client must use start/read/EOF/start/read/EOF without cancelling between sides.
+Other resolutions, including the vendor driver's 1200-dpi output, are not
+implemented. No host-side resolution resampling is performed.
+.PP
+Batch-scan defaults to yes and returns all sheets through successive starts.
+When set to no, it consumes all loaded sheets but returns only the selected
+side(s) of the first physical sheet. Later images are discarded on the host,
+not saved. This is a frontend compatibility workaround, not single-sheet
+feeding: do not load sheets that must remain in the tray.
+The first start waits for feeder exhaustion and successful cleanup before
+returning any image. Later-sheet faults or cancellation discard the retained
+first sheet too. Draining is capped at 100 total sheets and checks a
+120-second deadline between acquisitions; in-flight transactions retain their
+existing bounded waits. Reaching either limit reports an error and may require
+physical paper removal. Blank filtering applies only to the first sheet.
+.PP
+The upright-loading option defaults to no, matching documented face-down
+loading and retaining native side/orientation handling.
+For optional USB face-up loading with text readable upright in the tray,
+set upright-loading to yes. Logical sides are swapped and both images
+are rotated 180 degrees on the host. Acquisition-window coordinates are
+mirrored to the native feeder orientation. Back-rotate applies an additional
+rotation to the logical back only.
+Upright-loading is false and inactive on LAN.
+Sheet order remains acquisition order; the option does not change which sheet
+the feeder picks first or reverse an entire stack.
+.PP
+Physical page dimensions and the tl-x, tl-y, br-x and br-y acquisition window
+use integer millimeters on USB. These options are inactive for LAN.
+Window coordinates are relative to the centered sheet; narrowing the physical
+page clamps the window to its new edges. The nominal 216-mm maximum is bounded
+to the feeder's pixel width (2550 pixels at 300 dpi, 5100 at 600 dpi).
+Invalid or unsupported profiles are rejected before scanner I/O.
+Brightness, contrast, threshold and back-rotate are computer-side processing.
+Autocrop, deskew and skip-blank are optional and disabled by default. Blank
+filtering may discard faint marks and changes front/back numbering. At most
+32 fully blank sheets are acquired per start.
+.PP
+Rotation, autocrop, deskew and blank detection use SANE's shared sanei_magic
+helpers. Autocrop detects paper edges rather than a content bounding box.
+Crop-margin retains pixels around those edges. Deskew uses paper edges and
+is limited to five degrees. If no suitable edges are found, geometry remains
+unchanged. The former content-threshold option is no longer exposed.
+Blank-per-mille limits average RGB darkness per thousand, not the number of
+pixels below a threshold: zero means white and one thousand means black.
+Blank detection follows deskew/crop and includes the entire resulting image,
+including small scan windows and remaining edge marks.
+Gray/Lineart conversion and brightness/contrast retain their
+existing local implementation and output semantics.
+Cancellation is checked between shared helper calls, not inside them.
+.PP
+LAN retains the image socket and client lock across sheets in one feeder job.
+There is no prepare/start/stop cycle between sheets. Cancel requests termination
+using lock-free atomic state; bounded cleanup occurs in a normal backend call,
+on close, or in a per-handle worker polling every 100 ms while the frontend is
+idle, never in a signal handler. Close waits for this worker.
+USB finishes pending command/data
+transactions and final completion records before cleanup. Its image phase has
+a 120-second timeout budget, with up to thirty seconds for the first image
+header and five seconds for later headers, and up to thirty seconds for a
+payload transaction, followed by up to 25 seconds for STOP/unlock. Cancellation
+can therefore wait for an accepted USB transaction; moving-paper cancellation
+has not been physically validated.
+After end-of-feeder, a paper jam or a failed job on either transport,
+cancel or reopen before starting another job. Option changes during a live
+job are refused.
+.SH EXAMPLE
+Replace the example address with the scanner's actual IPv4 address:
+.PP
+.nf
+scanimage \\
+  \-d sp1130n:tcp:192.168.1.50 \-\-source "ADF Duplex" \\
+  \-\-batch=side-%03d.pnm \-\-batch-count=2 \-\-format=pnm
+.fi
+.SH LIMITATIONS
+This backend is Linux-only and requires libusb-1.0, libjpeg and pthreads.
+Only one SANE handle can be open. Discovery, encryption negotiation, scanner
+configuration, vendor calibration, maintenance resets and firmware upload are
+not implemented. Scanner faults or transport failure can leave a device lock
+despite bounded cleanup. A frontend that cancels between pages loses the
+buffered back image and ends the feeder job.
+Opening a LAN handle is lazy and does not contact the scanner.
+GNOME Document Scanner 46's Single Page action does this after one image,
+even with Both Sides selected. It sets batch-scan to no, so the compatibility
+mode consumes the entire loaded stack before returning that one image.
+Use All Pages From Feeder with Both Sides to retain every duplex image,
+including when only one sheet is loaded.
+Its Image preset selects Color; the default Text preset selects Gray and
+reduces the returned grayscale to four shades. Full eight-bit Gray and
+one-bit Lineart remain available through clients exposing scan mode.
+.PP
+The USB transport uses SANE's shared sanei_usb helper.
+It does not enable the previous direct-libusb inquiry/image-tail recovery:
+the helper does not expose timeout-specific status or reliable partial-byte
+counts on failed transfers. The current helper also clears endpoint halt
+on bulk errors. A transfer failure blocks subsequent I/O on that connection,
+including cleanup commands, rather than guessing the reply boundary.
+No scanner reset or automatic acquisition retry is added.
+Close/reopen clears host state, not necessarily pending replies or the
+scanner lock; physical clearance or a power cycle may be needed after faults.
+The shared helper passed one two-sheet Color/300-dpi duplex batch on
+November 3, 2026, with four complete images, positive feeder exhaustion,
+successful STOP/unlock, independent idle status and user-confirmed full
+ejection. Other shared-USB modes and fault recovery remain unvalidated on
+hardware; earlier direct-libusb results do not establish them.
+.PP
+Selected physical checks on a Fujitsu-ID SP-1130N passed native USB/LAN
+Color/300-dpi labeled duplex, complete image output, positive exhaustion,
+and loaded restart on one handle after exhaustion, cancel and reload.
+USB front/back-only labels and optional back rotation passed limited tests.
+LAN source-selection and back-rotation labels remain unverified.
+Color/Gray/Lineart stacks also completed through localhost-only saned;
+this is not GUI validation.
+.PP
+USB600 has both successful batches and unexplained intermittent startup
+and partial-ejection failures. Complete images, empty-input status and
+STOP/unlock acknowledgements do not prove physical paper ejection.
+Calibrated windows/offsets, actual processing effects, moving-paper
+cancellation, USB cover handling and broader fault recovery remain
+unvalidated. Ethernet idle empty-cover rejection and fresh-handle recovery
+have limited physical results; other recovery is not implied.
+USB event-2 continuation (further block reads on the same START) and
+alternate LAN START-prefix handling have synthetic coverage only.
+Consecutive empty image replies are retried with a short backoff within
+the existing acquisition deadline. See doc/sp1130n/README.md for the dated validation
+summary and remaining review/release limits.
+Short-header-only streams without a full side-identifying status record are
+unsupported; front/back identity is never inferred from arrival order.
+.SH LICENSE
+The SP-1130N implementation and its synthetic tests are licensed under MIT;
+see backend/sp1130n-license.txt. Existing SANE files retain their own licenses.
+.SH SEE ALSO
+.BR sane (7),
+.BR scanimage (1),
+.BR sane-dll (5)

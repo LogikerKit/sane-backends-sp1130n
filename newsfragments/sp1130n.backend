@@ -1,0 +1,5 @@
+sp1130n: Added Linux USB and native LAN support for the Ricoh/Fujitsu
+SP-1130N, with default duplex scanning, front/back-only output and
+Color/Gray/Lineart modes. Basic USB/LAN support has been tested on the
+Fujitsu-ID model; the Ricoh USB ID and some modes and recovery paths
+remain unvalidated.
