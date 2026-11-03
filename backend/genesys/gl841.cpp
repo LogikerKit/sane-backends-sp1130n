@@ -636,15 +636,20 @@ static void gl841_init_motor_regs_feed(Genesys_Device* dev, const Genesys_Sensor
         reg->find_reg(0x02).value &= ~REG_0x02_MTRREV;
     }
 
-    scanner_send_slope_table(dev, sensor, 3, fast_table.table);
+    // Two-table feeding (FASTFED) is not used, so the feed runs on table 0. Use the fast table
+    // for all tables, otherwise table 0 keeps the slowest possible step time set above.
+    for (unsigned table_nr = 0; table_nr < 5; ++table_nr) {
+        scanner_send_slope_table(dev, sensor, table_nr, fast_table.table);
+    }
 
+    unsigned fast_steps = fast_table.table.size() / step_multiplier;
     reg->set8(0x67, 0x3f);
     reg->set8(0x68, 0x3f);
-    reg->set8(REG_STEPNO, 1);
-    reg->set8(REG_FASTNO, 1);
-    reg->set8(0x69, 1);
-    reg->set8(0x6a, fast_table.table.size() / step_multiplier);
-    reg->set8(0x5f, 1);
+    reg->set8(REG_STEPNO, fast_steps);
+    reg->set8(REG_FASTNO, fast_steps);
+    reg->set8(0x69, fast_steps);
+    reg->set8(0x6a, fast_steps);
+    reg->set8(0x5f, fast_steps);
 }
 
 static void gl841_init_motor_regs_scan(Genesys_Device* dev, const Genesys_Sensor& sensor,
