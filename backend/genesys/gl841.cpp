@@ -1429,15 +1429,32 @@ void CommandSetGl841::detect_document_end(Genesys_Device* dev) const
         DBG(DBG_io, "%s: output_lines=%zu\n", __func__, output_lines);
         DBG(DBG_io, "%s: remaining_lines=%zu\n", __func__, remaining_lines);
 
-        if (scan_end_lines > output_lines) {
-            auto skip_lines = scan_end_lines - output_lines;
+        // The document ended before the requested scan length: only deliver up to
+        // scan_end_lines. The new totals are computed from what was already delivered to the
+        // frontend, so that they can only shrink. Note that on CIS color scans each output line
+        // consists of three raw (single color) lines.
+        if (scan_end_lines < output_lines) {
+            std::size_t line_bytes = dev->session.output_line_bytes_requested;
+            std::size_t delivered_lines = line_bytes ? dev->total_bytes_read / line_bytes : 0;
+            std::size_t keep_lines = scan_end_lines > delivered_lines
+                                         ? scan_end_lines - delivered_lines : 0;
 
-            if (remaining_lines > skip_lines) {
-                remaining_lines -= skip_lines;
-                dev->get_pipeline_source().set_remaining_bytes(remaining_lines *
-                                                               dev->session.output_line_bytes_raw);
-                dev->total_bytes_to_read -= skip_lines * dev->session.output_line_bytes_requested;
+            std::size_t new_total = dev->total_bytes_read + keep_lines * line_bytes;
+            if (new_total < dev->total_bytes_to_read) {
+                dev->total_bytes_to_read = new_total;
             }
+
+            std::size_t raw_lines_per_line =
+                    (dev->settings.scan_mode == ScanColorMode::COLOR_SINGLE_PASS &&
+                     dev->model->is_cis) ? 3 : 1;
+            // over-estimating is fine: the frontend stops at total_bytes_to_read anyway
+            std::size_t keep_raw = (keep_lines + 1) * raw_lines_per_line *
+                                   dev->session.output_line_bytes_raw;
+            if (keep_raw < dev->get_pipeline_source().remaining_bytes()) {
+                dev->get_pipeline_source().set_remaining_bytes(keep_raw);
+            }
+            DBG(DBG_info, "%s: document end, keeping %zu more lines, total_bytes_to_read=%zu\n",
+                __func__, keep_lines, dev->total_bytes_to_read);
         }
     }
 }
