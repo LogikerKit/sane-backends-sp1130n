@@ -1,0 +1,1 @@
+avision: Extend the flatbed width by the NVRAM side edge offset on the iVina FB6280E, so it can scan all the way to the book edge.
