@@ -305,10 +305,16 @@ the recognized empty tag returns no documents before PREPARE/START.
 The observed second word is `0x04000000`, not required to be zero.
 Unknown tags are not treated as empty. A nonzero firmware error takes
 precedence over the tag.
-A direct orderly image-socket close at the start of a later sheet also
-requires this inquiry before reporting exhaustion. Loaded or unknown paper
-remains an I/O error; cover and firmware faults are preserved. An authored
-regression covers empty/loaded/unknown/cover/jam replies, latching and cleanup.
+A direct image-socket close/reset at the start of a later sheet also
+requires this inquiry before reporting exhaustion, including a failed request
+write after the frontend has consumed both sides. This applies only after a
+complete decoded sheet, before any response bytes for the next sheet; pending
+unread bytes on a failed write prevent this interpretation. Socket timeouts,
+partial replies and failures during the first sheet never qualify.
+Loaded or unknown paper remains an I/O error; cover and firmware faults are
+preserved. Authored regressions cover idle and request-time closure/reset,
+empty/loaded/unknown/cover/jam replies, first-sheet reset, latching and cleanup.
+This extension has software coverage; a large PNG hardware retest is pending.
 An idle empty-feeder open/closed-cover comparison returned `0xc5000001`
 with the cover open and `0xc5000000` after closing it, with zero error and
 geometry in both replies. The observed open-cover tag now returns cover open

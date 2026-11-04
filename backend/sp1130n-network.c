@@ -53,6 +53,18 @@ disconnect (struct sanei_sp1130n_net *n)
   n->blocks = 0;
 }
 
+static void
+check_pending_reply (struct sanei_sp1130n_net *n)
+{
+  if (n->peer_closed)
+    {
+      uint8_t pending;
+      /* A failed write must not turn unread image bytes into feeder EOF. */
+      if (recv (n->fd, &pending, 1, MSG_PEEK | MSG_DONTWAIT) > 0)
+        n->peer_closed = 0;
+    }
+}
+
 static int
 wait_ready (struct sanei_sp1130n_net *n, short events, uint64_t deadline)
 {
@@ -78,6 +90,16 @@ wait_ready (struct sanei_sp1130n_net *n, short events, uint64_t deadline)
       if (p.revents & (POLLERR | POLLHUP | POLLNVAL))
         {
           n->peer_closed = !!(p.revents & POLLHUP);
+          if (p.revents & POLLERR)
+            {
+              int error = 0;
+              socklen_t size = sizeof error;
+              if (!getsockopt (n->fd, SOL_SOCKET, SO_ERROR, &error, &size) &&
+                  (error == EPIPE || error == ECONNRESET))
+                n->peer_closed = 1;
+            }
+          if (events == POLLOUT)
+            check_pending_reply (n);
           return SP_IO;
         }
     }
@@ -236,12 +258,8 @@ transfer (void *context, int input, uint8_t *data, size_t size,
           int status = input && count == 0 ? SP_EOF : SP_IO;
           n->peer_closed = (input && count == 0) ||
             (count < 0 && (errno == EPIPE || errno == ECONNRESET));
-          if (!input && n->peer_closed)
-            {
-              uint8_t pending;
-              if (recv (n->fd, &pending, 1, MSG_PEEK | MSG_DONTWAIT) > 0)
-                n->peer_closed = 0;
-            }
+          if (!input)
+            check_pending_reply (n);
           disconnect (n);
           return status;
         }

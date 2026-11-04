@@ -78,6 +78,8 @@ class Scanner:
         self.stop = threading.Event()
         self.image_ready = threading.Event()
         self.next_sheet_ready = threading.Event()
+        self.frontend_idle = threading.Event()
+        self.image_stream_closed = threading.Event()
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen()
@@ -235,6 +237,10 @@ class Scanner:
                             if self.end_boundary and self.block == self.sheets * 4:
                                 if self.end_boundary == "direct_close":
                                     break
+                                if self.end_boundary == "direct_reset":
+                                    connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                                          struct.pack("ii", 1, 0))
+                                    break
                                 if not self.end_record_sent:
                                     reply = bytearray(64)
                                     struct.pack_into("<I", reply, 12, 1)
@@ -274,6 +280,10 @@ class Scanner:
                                 break
                             if self.fault == "wait_image" and self.block == 0:
                                 self.stop.wait(0.3)
+                                break
+                            if self.fault == "initial_reset" and self.block == 0:
+                                connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                                      struct.pack("ii", 1, 0))
                                 break
                             if self.fault == "initial_device_error" and self.block == 0:
                                 reply = bytearray(32)
@@ -331,8 +341,18 @@ class Scanner:
                                 break
                             self.send(connection, reply + payload)
                             self.block += 1
+                            if (self.block == self.sheets * 4 and
+                                    self.end_boundary in ("idle_close", "idle_reset")):
+                                # Close only after the frontend has consumed both sides.
+                                assert self.frontend_idle.wait(2)
+                                if self.end_boundary == "idle_reset":
+                                    connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                                          struct.pack("ii", 1, 0))
+                                break
                         else:
                             raise AssertionError(f"Unexpected command {(op, sub, selector, value)}")
+                if blocks_on_session and self.block == self.sheets * 4:
+                    self.image_stream_closed.set()
                 with self.closed:
                     self.closed_sessions += 1
                     self.closed.notify_all()
@@ -548,6 +568,38 @@ class NetworkTests(unittest.TestCase):
                 self.assertEqual(scanner.commands.count((0x14, 4, 0, 0)), 1)
                 self.assertEqual(scanner.commands[-1], (0x2a, 0x78, 2, 40))
                 self.assertEqual((0x14, 6, 0, 0) in scanner.commands, expected != 7)
+
+    def test_idle_sheet_boundary_close_requires_confirmed_empty_feeder(self):
+        library = self.sane_library()
+        for ending in ("idle_close", "idle_reset", "direct_reset"):
+            for tag, error, expected in (
+                    (0xc5000000, 0, 7), (0xc5000002, 0, 9), (0, 0, 9),
+                    (0xc5000001, 0, 8), (0xc5000000, 0x2002, 6),
+                    (0xc5000000, 0x4004, 9)):
+                with self.subTest(ending=ending, tag=tag, error=error):
+                    with Scanner(self.images, last_status=0x1005,
+                                 end_boundary=ending, end_paper_tag=tag,
+                                 end_paper_error=error) as scanner:
+                        handle = ctypes.c_void_p()
+                        self.assertEqual(library.sane_sp1130n_open(
+                            scanner.name[8:].encode(), ctypes.byref(handle)), 0)
+                        try:
+                            for value in (40, 200):
+                                self.assertEqual(library.sane_sp1130n_start(handle), 0)
+                                self.sane_read_page(library, handle, value)
+                            if ending.startswith("idle_"):
+                                scanner.frontend_idle.set()
+                                self.assertTrue(scanner.image_stream_closed.wait(1))
+                            self.assertEqual(library.sane_sp1130n_start(handle), expected)
+                            before = len(scanner.commands)
+                            self.assertEqual(library.sane_sp1130n_start(handle), expected)
+                            self.assertEqual(len(scanner.commands), before)
+                        finally:
+                            library.sane_sp1130n_close(handle)
+                    self.assertEqual(scanner.commands.count((0x12, 2, 32, 0)), 2)
+                    self.assertEqual(scanner.commands.count((0x14, 4, 0, 0)), 1)
+                    self.assertEqual(scanner.commands[-1], (0x2a, 0x78, 2, 40))
+                    self.assertEqual((0x14, 6, 0, 0) in scanner.commands, expected != 7)
 
     def test_real_cli_duplex_and_front_back_sources(self):
         for source, sides in (("duplex", (0, 1)), ("front", (0,)), ("back", (1,))):
@@ -1080,6 +1132,24 @@ class NetworkTests(unittest.TestCase):
                     self.assertEqual(len(scanner.commands), before)
                 finally:
                     library.sane_sp1130n_close(handle)
+
+    def test_initial_socket_reset_is_not_feeder_exhaustion(self):
+        library = self.sane_library()
+        with Scanner(self.images, fault="initial_reset") as scanner:
+            handle = ctypes.c_void_p()
+            self.assertEqual(library.sane_sp1130n_open(
+                scanner.name[8:].encode(), ctypes.byref(handle)), 0)
+            try:
+                self.assertEqual(library.sane_sp1130n_start(handle), 9)
+                before = len(scanner.commands)
+                self.assertEqual(library.sane_sp1130n_start(handle), 9)
+                self.assertEqual(len(scanner.commands), before)
+            finally:
+                library.sane_sp1130n_close(handle)
+        self.assertEqual(scanner.commands.count((0x12, 2, 32, 0)), 1)
+        self.assertEqual(scanner.commands.count((0x14, 4, 0, 0)), 1)
+        self.assertEqual(scanner.commands[-2:],
+                         [(0x14, 6, 0, 0), (0x2a, 0x78, 2, 40)])
 
     def test_initial_device_error_is_latched_without_retry(self):
         library = self.sane_library()

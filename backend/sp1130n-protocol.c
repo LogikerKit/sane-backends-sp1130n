@@ -431,11 +431,12 @@ network_blocks (struct sanei_sp1130n_io *io, struct compressed_page pages[3],
                         status == SP_OK ? 32 : 0);
       if (status != SP_OK)
         {
-          if (empty_boundary && io->closed_without_reply &&
+          if ((empty_boundary || (!block && prior_sheets)) &&
+              io->closed_without_reply &&
               io->closed_without_reply (io) &&
               (status == SP_IO || status == SP_EOF))
             {
-              /* Never treat a reset alone as EOF: confirm paper status first. */
+              /* A complete-sheet idle close still needs verified empty status. */
               int paper = network_paper_status (io);
               return paper == SP_OK ? SP_IO : paper;
             }
