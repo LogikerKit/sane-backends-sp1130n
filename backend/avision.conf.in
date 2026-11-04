@@ -9,6 +9,9 @@
 #option disable-calibration
 #option force-a4
 
+# Ignore the ADF, for scanners that report one when none is fitted
+#option skip-adf
+
 #scsi AVISION
 #scsi FCPA
 #scsi MINOLTA

@@ -5346,6 +5346,14 @@ additional_probe (Avision_Scanner* s)
     dev->color_list_default--;
   }
 
+  /* skip-adf hides the ADF, except on sheetfed where it is the only source */
+  if (skip_adf && dev->scanner_type != AV_SHEETFEED)
+    {
+      DBG (1, "additional_probe: skip-adf set, ignoring the ADF\n");
+      dev->inquiry_adf_present = SANE_FALSE;
+      dev->inquiry_duplex = SANE_FALSE;
+    }
+
   if (dev->scanner_type == AV_SHEETFEED)
     {
       add_source_mode (dev, AV_ADF, "ADF Front");
