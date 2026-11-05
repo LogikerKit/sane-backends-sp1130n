@@ -735,6 +735,28 @@ void scanner_stop_action_no_move(Genesys_Device& dev, genesys::Genesys_Register_
     // same across all supported ASICs
     dev.interface->write_register(0x01, regs.get8(0x01));
 
+    if (dev.model->asic_type == AsicType::GL841 && dev.model->is_sheetfed) {
+        // Clearing the SCAN bit is not enough to stop the motor on gl841 sheetfed scanners: it
+        // keeps feeding. Turn the motor off and shorten the feed in the same way as
+        // gl841_init_motor_regs_off() does.
+        std::uint8_t reg02 = regs.get8(gl841::REG_0x02);
+        reg02 &= ~(gl841::REG_0x02_NOTHOME | gl841::REG_0x02_ACDCDIS | gl841::REG_0x02_AGOHOME |
+                   gl841::REG_0x02_MTRPWR | gl841::REG_0x02_FASTFED | gl841::REG_0x02_MTRREV |
+                   gl841::REG_0x02_HOMENEG | gl841::REG_0x02_LONGCURV);
+        dev.interface->write_register(gl841::REG_0x02, reg02);
+
+        const std::pair<std::uint16_t, std::uint8_t> motor_off_regs[] = {
+            { gl841::REG_STEPNO, 0 }, { gl841::REG_FASTNO, 0 },
+            { 0x25, 0 }, { 0x26, 0 }, { 0x27, 0 },
+            { 0x3d, 0 }, { 0x3e, 0 }, { 0x3f, 2 },
+            { 0x5e, static_cast<std::uint8_t>(regs.get8(0x5e) & ~0xe0) }, { 0x5f, 0 },
+            { 0x67, 0x3f }, { 0x68, 0x3f }, { 0x69, 0 }, { 0x6a, 0 },
+        };
+        for (const auto& reg : motor_off_regs) {
+            dev.interface->write_register(reg.first, reg.second);
+        }
+    }
+
     // looks like certain scanners lock up if we try to scan immediately after stopping previous
     // action.
     dev.interface->sleep_ms(100);
@@ -1218,7 +1240,7 @@ void scanner_search_strip(Genesys_Device& dev, bool forward, bool black)
     session.params.brightness_adjustment = dev.settings.brightness;
     session.params.flags = ScanFlag::DISABLE_SHADING |
                            ScanFlag::DISABLE_GAMMA;
-    if (dev.model->asic_type != AsicType::GL841 && !forward) {
+    if (!forward) {
         session.params.flags |= ScanFlag::REVERSE;
     }
     compute_session(&dev, session, sensor);
@@ -1901,6 +1923,11 @@ void scanner_coarse_gain_calibration(Genesys_Device& dev, const Genesys_Sensor& 
             std::sort(values.begin(), values.end());
             curr_output = static_cast<float>(values[unsigned((values.size() - 1) * 0.95)]);
             target_value = calib_sensor->gain_white_ref * coeff;
+            if (dev.model->asic_type == AsicType::GL841 && dev.model->is_sheetfed) {
+                // gl841 scans with 16 bit depth here (see session.params.depth above), but
+                // gain_white_ref is an 8 bit value
+                target_value = 65535.0f * coeff;
+            }
 
         } else {
             // FIXME: use the GL843 approach
@@ -2074,6 +2101,19 @@ SensorExposure scanner_led_calibration(Genesys_Device& dev, const Genesys_Sensor
     for (unsigned i_test = 0; i_test < 100 && !acceptable; ++i_test) {
         regs_set_exposure(dev.model->asic_type, regs, { exp[0], exp[1], exp[2] });
 
+        if (dev.model->asic_type == AsicType::GL841 && dev.model->is_sheetfed) {
+            // The LED on-time is limited by the line period, which was computed from the
+            // initial exposure. Make sure it covers the current exposure, otherwise the LED
+            // on-time is clipped and the measured brightness stops responding.
+            unsigned needed = std::max({ exp[0], exp[1], exp[2] }) + regs.get8(0x19);
+            needed = std::min(needed, 65535u);
+            if (regs.get16(0x38) < needed) {
+                DBG(DBG_info, "%s: widening line period %d -> %u for exposure\n", __func__,
+                    regs.get16(0x38), needed);
+                regs.set16(0x38, static_cast<std::uint16_t>(needed));
+            }
+        }
+
         dev.interface->write_registers(regs);
 
         dbg.log(DBG_info, "starting line reading");
@@ -2157,11 +2197,17 @@ SensorExposure scanner_led_calibration(Genesys_Device& dev, const Genesys_Sensor
                 // we accept +- 2% delta from target
                 if (std::abs(avg[i] - target) > target / 50) {
                     float prev_weight = 0.5;
+                    float new_exp = 0;
                     if (avg[i] != 0) {
-                        exp[i] = exp[i] * prev_weight + ((exp[i] * target) / avg[i]) * (1 - prev_weight);
+                        new_exp = exp[i] * prev_weight +
+                                  ((static_cast<float>(exp[i]) * target) / avg[i]) *
+                                  (1 - prev_weight);
                     } else {
-                        exp[i] = exp[i] * prev_weight + (exp[i] * 10) * (1 - prev_weight);
+                        new_exp = exp[i] * prev_weight + (exp[i] * 10.0f) * (1 - prev_weight);
                     }
+                    // assigning an out of range value to std::uint16_t would wrap around
+                    new_exp = std::min(std::max(new_exp, 1.0f), 65535.0f);
+                    exp[i] = static_cast<std::uint16_t>(new_exp);
                     acceptable = false;
                 }
             }
@@ -3764,7 +3810,15 @@ static void genesys_sheetfed_calibration(Genesys_Device* dev, Genesys_Sensor& se
     {
         // ADC now sends correct data, we can configure the exposure for the LEDs
         dev->interface->record_progress_message("led_calibration");
-        dev->cmd_set->led_calibration(dev, sensor, local_reg);
+        auto calib_exposure = dev->cmd_set->led_calibration(dev, sensor, local_reg);
+        if (dev->model->asic_type == AsicType::GL841) {
+            // store the result in the same way as genesys_flatbed_calibration() does
+            for (auto& sensor_update :
+                    sanei_genesys_find_sensors_all_for_write(dev, sensor.method)) {
+                sensor_update.get().exposure = calib_exposure;
+            }
+            sensor.exposure = calib_exposure;
+        }
 
         if (!has_flag(dev->model->flags, ModelFlag::DISABLE_ADC_CALIBRATION)) {
             // recalibrate ADC again for the new LED exposure
@@ -6082,6 +6136,16 @@ static void set_option_value(Genesys_Scanner* s, int option, void *val, SANE_Int
             break;
         }
         case OPT_CALIBRATE: {
+            // the cache file is otherwise only set up in sane_start()
+            if (dev->force_calibration == 0 && dev->calib_file.empty()) {
+                auto path = calibration_filename(dev);
+                s->calibration_file = path;
+                dev->calib_file = path;
+                catch_all_exceptions(__func__, [&]()
+                {
+                    sanei_genesys_read_calibration(dev->calibration_cache, dev->calib_file);
+                });
+            }
             auto& sensor = sanei_genesys_find_sensor_for_write(dev, dev->settings.xres,
                                                                dev->settings.get_channels(),
                                                                dev->settings.scan_method);

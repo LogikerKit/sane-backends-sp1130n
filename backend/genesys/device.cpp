@@ -145,12 +145,17 @@ void Genesys_Device::advance_head_pos_by_session(ScanHeadId scan_head)
     advance_head_pos_by_steps(scan_head, direction, motor_steps);
 }
 
-static void advance_pos(unsigned& pos, Direction direction, unsigned offset)
+static void advance_pos(unsigned& pos, Direction direction, unsigned offset, bool is_sheetfed)
 {
     if (direction == Direction::FORWARD) {
         pos += offset;
     } else {
         if (pos < offset) {
+            // sheetfed scanners move the sheet, not a head, so moving backwards is fine
+            if (is_sheetfed) {
+                pos = 0;
+                return;
+            }
             throw SaneException("Trying to advance head behind the home sensor");
         }
         pos -= offset;
@@ -164,13 +169,13 @@ void Genesys_Device::advance_head_pos_by_steps(ScanHeadId scan_head, Direction d
         if (!is_head_pos_primary_known_) {
             throw SaneException("Trying to advance head while scanhead position is not known");
         }
-        advance_pos(head_pos_primary_, direction, steps);
+        advance_pos(head_pos_primary_, direction, steps, model->is_sheetfed);
     }
     if ((scan_head & ScanHeadId::SECONDARY) != ScanHeadId::NONE) {
         if (!is_head_pos_secondary_known_) {
             throw SaneException("Trying to advance head while scanhead position is not known");
         }
-        advance_pos(head_pos_secondary_, direction, steps);
+        advance_pos(head_pos_secondary_, direction, steps, model->is_sheetfed);
     }
 }
 

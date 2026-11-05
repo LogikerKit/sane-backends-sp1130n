@@ -636,15 +636,20 @@ static void gl841_init_motor_regs_feed(Genesys_Device* dev, const Genesys_Sensor
         reg->find_reg(0x02).value &= ~REG_0x02_MTRREV;
     }
 
-    scanner_send_slope_table(dev, sensor, 3, fast_table.table);
+    // Two-table feeding (FASTFED) is not used, so the feed runs on table 0. Use the fast table
+    // for all tables, otherwise table 0 keeps the slowest possible step time set above.
+    for (unsigned table_nr = 0; table_nr < 5; ++table_nr) {
+        scanner_send_slope_table(dev, sensor, table_nr, fast_table.table);
+    }
 
+    unsigned fast_steps = fast_table.table.size() / step_multiplier;
     reg->set8(0x67, 0x3f);
     reg->set8(0x68, 0x3f);
-    reg->set8(REG_STEPNO, 1);
-    reg->set8(REG_FASTNO, 1);
-    reg->set8(0x69, 1);
-    reg->set8(0x6a, fast_table.table.size() / step_multiplier);
-    reg->set8(0x5f, 1);
+    reg->set8(REG_STEPNO, fast_steps);
+    reg->set8(REG_FASTNO, fast_steps);
+    reg->set8(0x69, fast_steps);
+    reg->set8(0x6a, fast_steps);
+    reg->set8(0x5f, fast_steps);
 }
 
 static void gl841_init_motor_regs_scan(Genesys_Device* dev, const Genesys_Sensor& sensor,
@@ -1429,15 +1434,32 @@ void CommandSetGl841::detect_document_end(Genesys_Device* dev) const
         DBG(DBG_io, "%s: output_lines=%zu\n", __func__, output_lines);
         DBG(DBG_io, "%s: remaining_lines=%zu\n", __func__, remaining_lines);
 
-        if (scan_end_lines > output_lines) {
-            auto skip_lines = scan_end_lines - output_lines;
+        // The document ended before the requested scan length: only deliver up to
+        // scan_end_lines. The new totals are computed from what was already delivered to the
+        // frontend, so that they can only shrink. Note that on CIS color scans each output line
+        // consists of three raw (single color) lines.
+        if (scan_end_lines < output_lines) {
+            std::size_t line_bytes = dev->session.output_line_bytes_requested;
+            std::size_t delivered_lines = line_bytes ? dev->total_bytes_read / line_bytes : 0;
+            std::size_t keep_lines = scan_end_lines > delivered_lines
+                                         ? scan_end_lines - delivered_lines : 0;
 
-            if (remaining_lines > skip_lines) {
-                remaining_lines -= skip_lines;
-                dev->get_pipeline_source().set_remaining_bytes(remaining_lines *
-                                                               dev->session.output_line_bytes_raw);
-                dev->total_bytes_to_read -= skip_lines * dev->session.output_line_bytes_requested;
+            std::size_t new_total = dev->total_bytes_read + keep_lines * line_bytes;
+            if (new_total < dev->total_bytes_to_read) {
+                dev->total_bytes_to_read = new_total;
             }
+
+            std::size_t raw_lines_per_line =
+                    (dev->settings.scan_mode == ScanColorMode::COLOR_SINGLE_PASS &&
+                     dev->model->is_cis) ? 3 : 1;
+            // over-estimating is fine: the frontend stops at total_bytes_to_read anyway
+            std::size_t keep_raw = (keep_lines + 1) * raw_lines_per_line *
+                                   dev->session.output_line_bytes_raw;
+            if (keep_raw < dev->get_pipeline_source().remaining_bytes()) {
+                dev->get_pipeline_source().set_remaining_bytes(keep_raw);
+            }
+            DBG(DBG_info, "%s: document end, keeping %zu more lines, total_bytes_to_read=%zu\n",
+                __func__, keep_lines, dev->total_bytes_to_read);
         }
     }
 }
@@ -1527,8 +1549,13 @@ void CommandSetGl841::init_regs_for_shading(Genesys_Device* dev, const Genesys_S
     const auto& calib_sensor = sanei_genesys_find_sensor(dev, resolution, channels,
                                                          dev->settings.scan_method);
 
+    float calib_size_mm = dev->model->y_size_calib_dark_white_mm;
+    if (calib_size_mm <= 0 && dev->model->is_sheetfed) {
+        // sheetfed models don't define a separate dark/white calibration area
+        calib_size_mm = dev->model->y_size_calib_mm;
+    }
     unsigned calib_lines =
-            static_cast<unsigned>(dev->model->y_size_calib_dark_white_mm * resolution / MM_PER_INCH);
+            static_cast<unsigned>(calib_size_mm * resolution / MM_PER_INCH);
     unsigned starty =
             static_cast<unsigned>(dev->model->y_offset_calib_dark_white_mm * dev->motor.base_ydpi / MM_PER_INCH);
     ScanSession session;
