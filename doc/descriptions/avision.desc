@@ -524,6 +524,16 @@
 :status :good
 
 
+:mfg "Konica Minolta"
+:url "http://www.konicaminolta.com/"
+
+:model "Dimage Scan Dual IV"
+:interface "USB"
+:usbid "0x132b" "0x000a"
+:comment "1 pass, film-scanner; 35 mm strip and slide holders tested, APS adapter untested"
+:status :good
+
+
 :mfg "Minolta-QMS"
 
 :model "SC-110"

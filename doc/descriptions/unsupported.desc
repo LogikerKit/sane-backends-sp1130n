@@ -1325,13 +1325,6 @@
 :status :unsupported
 :comment "Unsupported. May work with vuescan. See link for details."
 
-:model "Dual Scan IV"
-:url "unsupported/minolta-dual-scan-IV.html"
-:interface "USB"
-:usbid "0x132b" "0x000a"
-:status :unsupported
-:comment "Unsupported. Works with vuescan. See link for details."
-
 :model "DiMAGE Scan Elite 5400"
 :url "unsupported/minolta-dse-5400.html"
 :interface "USB IEEE-1394"
