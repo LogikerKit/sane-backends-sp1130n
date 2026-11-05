@@ -1240,7 +1240,7 @@ void scanner_search_strip(Genesys_Device& dev, bool forward, bool black)
     session.params.brightness_adjustment = dev.settings.brightness;
     session.params.flags = ScanFlag::DISABLE_SHADING |
                            ScanFlag::DISABLE_GAMMA;
-    if ((dev.model->asic_type != AsicType::GL841 || dev.model->is_sheetfed) && !forward) {
+    if (!forward) {
         session.params.flags |= ScanFlag::REVERSE;
     }
     compute_session(&dev, session, sensor);
