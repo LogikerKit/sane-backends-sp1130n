@@ -776,7 +776,17 @@ get_scanner_id (const int dev_no, char *model)
 
   if (device[dev_no].protocol == PROTOCOL_BJNP)
     {
-      id_len = MIN(ntohl( id-> cmd.payload_len ) - sizeof(id-> payload.bjnp.id_len), BJNP_IEEE1284_MAX);
+      // Check validity of packet: must be big enough for length and the id itself.
+      size_t payload_len = ntohl( id->cmd.payload_len );
+      if ((payload_len < sizeof(id->payload.bjnp.id_len))
+          || (payload_len < sizeof(id->payload.bjnp.id_len) + (size_t) id->payload.bjnp.id_len))
+        {
+          PDBG (bjnp_dbg (LOG_DEBUG,
+                          "get_scanner_id: ERROR - scanner id length invalid or packet too short: packet len=%zu.\n",
+                          payload_len));
+          return -1;
+        }
+      id_len = MIN(payload_len - sizeof(id->payload.bjnp.id_len), BJNP_IEEE1284_MAX);
       strncpy(scanner_id, id->payload.bjnp.id, id_len);
       scanner_id[id_len] = '\0';
     }
