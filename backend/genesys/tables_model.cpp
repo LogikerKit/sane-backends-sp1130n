@@ -1162,14 +1162,65 @@ void genesys_init_usb_device_tables()
 
     s_usb_devices->emplace_back(0x04a9, 0x2214, model);
 
-    // LiDE 500F (GL841): shares the LiDE 80 model, since like the LiDE 80 it needs
-    // register 0x6b = 0x0c before PWRBIT or it drops off the bus.
+
+    // The LiDE 500F is nearly identical to the LiDE 80: it shares its frontend, GPIO and
+    // motor tables, and gl841.cpp treats both models the same. The differences are the
+    // sensor entry, CISSET and the position of the white calibration area.
+    model = Genesys_Model();
     model.name = "canon-lide-500f";
+    model.vendor = "Canon";
     model.model = "LiDE 500F";
-    model.sensor_id = SensorId::CIS_CANON_LIDE_500F;
-    // The LiDE 80's 4.5 mm lands on a dark band on the 500F (about 4.2-5.4 mm
-    // from home); its white area is at about 1.0-3.4 mm.
+    model.model_id = ModelId::CANON_LIDE_500F;
+    model.asic_type = AsicType::GL841;
+
+    model.resolutions = {
+        {
+            { ScanMethod::FLATBED },
+            {       1200, 600, 300, 150, 100, 75 },
+            { 2400, 1200, 600, 300, 150, 100, 75 },
+        }
+    };
+
+    model.bpp_gray_values = { 8, 16 };
+    model.bpp_color_values = { 8, 16 };
+    model.x_offset = 0.42;
+    model.y_offset = 7.90;
+    model.x_size = 216.07;
+    model.y_size = 299.0;
+
+    // the LiDE 80's 4.5 mm is on a dark band (about 4.2-5.4 mm from home) on the
+    // LiDE 500F, whose white area is at about 1.0-3.4 mm
     model.y_offset_calib_white = 2.0;
+    model.y_size_calib_mm = 3.0;
+    model.y_offset_calib_dark_white_mm = 1.0;
+    model.y_size_calib_dark_white_mm = 6.0;
+    model.x_offset_calib_black = 0.0;
+    model.x_size_calib_mm = 216.7467;
+
+    model.post_scan = 0.0;
+    model.eject_feed = 0.0;
+
+    model.ld_shift_r = 0;
+    model.ld_shift_g = 0;
+    model.ld_shift_b = 0;
+
+    model.line_mode_color_order = ColorOrder::RGB;
+
+    model.is_cis = true;
+    model.is_sheetfed = false;
+    model.sensor_id = SensorId::CIS_CANON_LIDE_500F;
+    model.adc_id = AdcId::CANON_LIDE_80;
+    model.gpio_id = GpioId::CANON_LIDE_80;
+    model.motor_id = MotorId::CANON_LIDE_80;
+    model.flags = ModelFlag::DARK_WHITE_CALIBRATION |
+                  ModelFlag::HOST_SIDE_GRAY |
+                  ModelFlag::CUSTOM_GAMMA;
+    model.buttons = GENESYS_HAS_SCAN_SW |
+                    GENESYS_HAS_FILE_SW |
+                    GENESYS_HAS_EMAIL_SW |
+                    GENESYS_HAS_COPY_SW;
+    model.search_lines = 400;
+
     s_usb_devices->emplace_back(0x04a9, 0x221f, model);
 
 
