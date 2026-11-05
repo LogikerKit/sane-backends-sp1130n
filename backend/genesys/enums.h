@@ -166,6 +166,7 @@ enum class ModelId : unsigned
     CANON_LIDE_200,
     CANON_LIDE_210,
     CANON_LIDE_220,
+    CANON_LIDE_500F,
     CANON_LIDE_700F,
     DCT_DOCKETPORT_487,
     HP_SCANJET_2300C,
@@ -265,6 +266,7 @@ enum class SensorId : unsigned
     CIS_CANON_LIDE_200,
     CIS_CANON_LIDE_210,
     CIS_CANON_LIDE_220,
+    CIS_CANON_LIDE_500F,
     CIS_CANON_LIDE_700F,
     CIS_XP200,
 };

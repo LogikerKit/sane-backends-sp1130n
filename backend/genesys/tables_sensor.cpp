@@ -3904,6 +3904,58 @@ void genesys_init_sensor_tables()
             s_sensors->push_back(sensor);
         }
     }
+
+    sensor = Genesys_Sensor();
+    sensor.sensor_id = SensorId::CIS_CANON_LIDE_500F; // gl841, LiDE 80 values except AFE sampling
+    sensor.full_resolution = 1200; // real hardware limit is 2400
+    sensor.register_dpihw = 1200;
+    sensor.black_pixels = 20;
+    sensor.dummy_pixel = 6;
+    sensor.fau_gain_white_ref = 150;
+    sensor.gain_white_ref = 150;
+    // maps to 0x70-0x73 for GL841
+    sensor.exposure = { 0x1000, 0x1000, 0x0500 };
+    // 0x52/0x53 and 0x58/0x59 are the values Canon's Mac OS X
+    // driver (InitialRegParam) uses; the LiDE 80 has 03/07 and 29/69.
+    sensor.custom_regs = {
+        { 0x16, 0x00 }, { 0x17, 0x01 }, { 0x18, 0x00 }, { 0x19, 0x06 },
+        { 0x1a, 0x00 }, { 0x1b, 0x00 }, { 0x1c, 0x00 }, { 0x1d, 0x04 },
+        { 0x52, 0x04 }, { 0x53, 0x00 }, { 0x54, 0x00 }, { 0x55, 0x00 },
+        { 0x56, 0x00 }, { 0x57, 0x00 }, { 0x58, 0x31 }, { 0x59, 0x71 }, { 0x5a, 0x55 },
+        { 0x70, 0x00 }, { 0x71, 0x05 }, { 0x72, 0x07 }, { 0x73, 0x09 },
+    };
+    sensor.gamma = { 1.0f, 1.0f, 1.0f };
+    {
+        struct CustomSensorSettings
+        {
+            ValueFilterAny<unsigned> resolutions;
+            unsigned optical_resolution;
+            unsigned register_dpiset;
+            unsigned shading_resolution;
+            unsigned shading_factor;
+            int output_pixel_offset;
+        };
+
+        CustomSensorSettings custom_settings[] = {
+            { { 75 }, 600, 150, 600, 8, 2 },
+            { { 100 }, 600, 200, 600, 6, 3 },
+            { { 150 }, 600, 300, 600, 4, 4 },
+            { { 200 }, 600, 400, 600, 3, 6 },
+            { { 300 }, 600, 600, 600, 2, 9 },
+            { { 600 }, 600, 1200, 600, 1, 17 },
+            { { 1200 }, 1200, 1200, 1200, 1, 35 },
+        };
+
+        for (const CustomSensorSettings& setting : custom_settings) {
+            sensor.resolutions = setting.resolutions;
+            sensor.optical_resolution = setting.optical_resolution;
+            sensor.register_dpiset = setting.register_dpiset;
+            sensor.shading_resolution = setting.shading_resolution;
+            sensor.shading_factor = setting.shading_factor;
+            sensor.output_pixel_offset = setting.output_pixel_offset;
+            s_sensors->push_back(sensor);
+        }
+    }
 }
 
 void verify_sensor_tables()

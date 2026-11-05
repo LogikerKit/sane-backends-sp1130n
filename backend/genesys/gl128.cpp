@@ -1577,7 +1577,7 @@ void CommandSetGl128::asic_boot(Genesys_Device* dev, bool cold) const
     // until power-off.
     dev->interface->write_0x8c(0x10, 0x0c);
     dev->interface->write_0x8c(0x13, 0x0c);
-    static constexpr std::pair<std::uint16_t, std::uint8_t> STARTUP_REGS[] = {
+    static const std::pair<std::uint16_t, std::uint8_t> STARTUP_REGS[] = {
         { 0x0b, 0x44 }, { 0x13, 0x0f }, { 0x0b, 0x4c },
     };
     for (const auto& r : STARTUP_REGS) {

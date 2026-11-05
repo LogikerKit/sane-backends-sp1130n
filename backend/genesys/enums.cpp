@@ -105,6 +105,7 @@ std::ostream& operator<<(std::ostream& out, ModelId id)
         case ModelId::CANON_LIDE_200: out << "CANON_LIDE_200"; break;
         case ModelId::CANON_LIDE_210: out << "CANON_LIDE_210"; break;
         case ModelId::CANON_LIDE_220: out << "CANON_LIDE_220"; break;
+        case ModelId::CANON_LIDE_500F: out << "CANON_LIDE_500F"; break;
         case ModelId::CANON_LIDE_700F: out << "CANON_LIDE_700F"; break;
         case ModelId::DCT_DOCKETPORT_487: out << "DCT_DOCKETPORT_487"; break;
         case ModelId::HP_SCANJET_2300C: out << "HP_SCANJET_2300C"; break;
@@ -194,6 +195,7 @@ std::ostream& operator<<(std::ostream& out, SensorId id)
         case SensorId::CIS_CANON_LIDE_200: out << "CIS_CANON_LIDE_200"; break;
         case SensorId::CIS_CANON_LIDE_210: out << "CIS_CANON_LIDE_210"; break;
         case SensorId::CIS_CANON_LIDE_220: out << "CIS_CANON_LIDE_220"; break;
+        case SensorId::CIS_CANON_LIDE_500F: out << "CIS_CANON_LIDE_500F"; break;
         case SensorId::CIS_CANON_LIDE_700F: out << "CIS_CANON_LIDE_700F"; break;
         case SensorId::CIS_XP200: out << "CIS_XP200"; break;
         default:

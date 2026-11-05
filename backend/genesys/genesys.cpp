@@ -1889,9 +1889,11 @@ void scanner_coarse_gain_calibration(Genesys_Device& dev, const Genesys_Sensor& 
         {
             std::vector<std::uint16_t> values;
             // FIXME: start from the second line because the first line often has artifacts. Probably
-            // caused by unclean cleanup of previous scan
+            // caused by unclean cleanup of previous scan. GL841 scans a single line, so there the
+            // first line is all there is.
+            std::size_t y = image.get_height() > 1 ? 1 : 0;
             for (std::size_t x = pixels / 4; x < (pixels * 3 / 4); x++) {
-                values.push_back(image.get_raw_channel(x, 1, ch));
+                values.push_back(image.get_raw_channel(x, y, ch));
             }
 
             // pick target value at 95th percentile of all values. There may be a lot of black values
@@ -2866,7 +2868,8 @@ static void compute_averaged_planar(Genesys_Device * dev, const Genesys_Sensor& 
     avgpixels = 15;
 
   /* LiDE80 packs shading data */
-  if (dev->model->sensor_id != SensorId::CIS_CANON_LIDE_80)
+  if (dev->model->sensor_id != SensorId::CIS_CANON_LIDE_80 &&
+      dev->model->sensor_id != SensorId::CIS_CANON_LIDE_500F)
     {
       factor=1;
       fill=avgpixels;
@@ -3258,7 +3261,8 @@ static void genesys_send_shading_coefficient(Genesys_Device* dev, const Genesys_
   /* special case, memory is aligned on 0x5400, this has yet to be explained */
   /* could be 0xa800 because sensor is truly 2400 dpi, then halved because
    * we only set 1200 dpi */
-  if(dev->model->sensor_id==SensorId::CIS_CANON_LIDE_80)
+  if (dev->model->sensor_id == SensorId::CIS_CANON_LIDE_80 ||
+      dev->model->sensor_id == SensorId::CIS_CANON_LIDE_500F)
     {
       words_per_color = 0x5400;
     }
@@ -3470,6 +3474,7 @@ static void genesys_send_shading_coefficient(Genesys_Device* dev, const Genesys_
                                0x0a00);
       break;
     case SensorId::CIS_CANON_LIDE_80:
+    case SensorId::CIS_CANON_LIDE_500F:
       compute_averaged_planar (dev, sensor,
                                shading_data.data(),
                                pixels_per_line,

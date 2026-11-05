@@ -60,24 +60,36 @@ gl841_init_registers (Genesys_Device * dev)
     } else {
         dev->reg.find_reg(0x01).value &= ~REG_0x01_CISSET;
     }
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x01, 0x82);
+    }
+    // Canon's driver never sets CISSET on the LiDE 500F
+    if (dev->model->model_id == ModelId::CANON_LIDE_500F) {
+        dev->reg.find_reg(0x01).value &= ~REG_0x01_CISSET;
     }
 
     dev->reg.init_reg(0x02, 0x38);
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x02, 0x10);
     }
 
     dev->reg.init_reg(0x03, 0x5f);
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x03, 0x50);
     }
 
     dev->reg.init_reg(0x04, 0x10);
     if (dev->model->model_id == ModelId::PLUSTEK_OPTICPRO_3600) {
         dev->reg.init_reg(0x04, 0x22);
-    } else if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    } else if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+               dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x04, 0x02);
     }
 
@@ -87,12 +99,16 @@ gl841_init_registers (Genesys_Device * dev)
 
     sanei_genesys_set_dpihw(dev->reg, sensor.register_dpihw);
 
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x05, 0x4c);
     }
 
     dev->reg.init_reg(0x06, 0x18);
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x06, 0x38);
     }
     if (dev->model->model_id == ModelId::VISIONEER_STROBE_XP300 ||
@@ -108,7 +124,9 @@ gl841_init_registers (Genesys_Device * dev)
     dev->reg.init_reg(0x08, 0x00);
 
     dev->reg.init_reg(0x09, 0x10);
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x09, 0x11);
     }
     if (dev->model->model_id == ModelId::VISIONEER_STROBE_XP300 ||
@@ -137,11 +155,15 @@ gl841_init_registers (Genesys_Device * dev)
     dev->reg.init_reg(0x1c, 0x00); // SENSOR_DEF, overwritten in scanner_setup_sensor() below
     dev->reg.init_reg(0x1d, 0x01); // SENSOR_DEF, overwritten in scanner_setup_sensor() below
     dev->reg.init_reg(0x1e, 0xf0);
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x1e, 0x10);
     }
     dev->reg.init_reg(0x1f, 0x01);
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x1f, 0x04);
     }
     dev->reg.init_reg(0x20, 0x20);
@@ -184,7 +206,9 @@ gl841_init_registers (Genesys_Device * dev)
     dev->reg.init_reg(0x59, 0x00);  // SENSOR_DEF, overwritten in scanner_setup_sensor() below
     dev->reg.init_reg(0x5a, 0x00);  // SENSOR_DEF, overwritten in scanner_setup_sensor() below
 
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x5d, 0x20);
         dev->reg.init_reg(0x5e, 0x41);
         dev->reg.init_reg(0x5f, 0x40);
@@ -218,7 +242,9 @@ gl841_init_registers (Genesys_Device * dev)
     dev->reg.init_reg(0x72, 0x00); // SENSOR_DEF, overwritten in scanner_setup_sensor() below
     dev->reg.init_reg(0x73, 0x00); // SENSOR_DEF, overwritten in scanner_setup_sensor() below
 
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         dev->reg.init_reg(0x74, 0x00);
         dev->reg.init_reg(0x75, 0x01);
         dev->reg.init_reg(0x76, 0xff);
@@ -268,7 +294,9 @@ gl841_init_registers (Genesys_Device * dev)
         dev->reg.find_reg(0x6b).value |= REG_0x6B_GPO17 | REG_0x6B_GPO18;
     }
 
-    if (dev->model->model_id == ModelId::CANON_LIDE_80) {
+    if (dev->model->model_id == ModelId::CANON_LIDE_80 ||
+        dev->model->model_id == ModelId::CANON_LIDE_500F)
+    {
         // specific scanner settings, clock and gpio first
         dev->interface->write_register(REG_0x6B, 0x0c);
         dev->interface->write_register(0x06, 0x10);
