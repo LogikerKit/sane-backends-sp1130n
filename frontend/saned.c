@@ -473,10 +473,36 @@ auth_callback (SANE_String_Const res,
       return;
     }
 
+  /*
+   * Copy out username and password if present with appropriate checks.
+   *
+   */
   if (req.username)
-    strcpy (username, req.username);
+    {
+      if (strlen (req.username) + 1 > SANE_MAX_USERNAME_LEN)
+        {
+          DBG (DBG_ERR, "auth_callback: username too long: %zu (max=%zu)\n",
+               strlen (req.username),
+               (size_t)SANE_MAX_USERNAME_LEN - 1);
+        }
+      else
+        {
+          strcpy (username, req.username);
+        }
+    }
   if (req.password)
-    strcpy (password, req.password);
+    {
+      if (strlen (req.password) + 1 > SANE_MAX_PASSWORD_LEN)
+        {
+          DBG (DBG_ERR, "auth_callback: password too long: %zu (max=%zu)\n",
+               strlen (req.password),
+               (size_t)SANE_MAX_PASSWORD_LEN - 1);
+        }
+      else
+        {
+          strcpy (password, req.password);
+        }
+    }
   if (!req.resource || strcmp (req.resource, res) != 0)
     {
       DBG (DBG_MSG,
