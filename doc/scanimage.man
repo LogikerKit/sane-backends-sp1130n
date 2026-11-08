@@ -273,7 +273,7 @@ from the file name. If that is not possible, it will print an error message and 
 .BR \-n ", " \-\-dont\-scan
 requests that
 .B scanimage
-only sets the options provided by the user but doesn't actually perform a
+only processes the options provided by the user but doesn't actually perform a
 scan. This option can be used to e.g. turn off the scanner's lamp (if
 supported by the backend).
 

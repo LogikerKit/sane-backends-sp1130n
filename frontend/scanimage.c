@@ -414,11 +414,16 @@ print_option (SANE_Device * device, int opt_num, const SANE_Option_Descriptor *o
   /* print the option choices */
   if (opt->type == SANE_TYPE_BOOL)
     {
-      fputs ("[=(", stdout);
+      if (!SANE_OPTION_IS_READONLY (opt->cap))
+        fputs ("[=(", stdout);
+      else
+        fputs(" (", stdout);
       if (opt->cap & SANE_CAP_AUTOMATIC)
-	fputs ("auto|", stdout);
-      fputs ("yes|no)]", stdout);
-    }
+        fputs ("auto|", stdout);
+      fputs ("yes|no)", stdout);
+      if (!SANE_OPTION_IS_READONLY (opt->cap))
+        fputc (']', stdout);
+      }
   else if (opt->type != SANE_TYPE_BUTTON)
     {
       fputc (' ', stdout);
@@ -639,7 +644,7 @@ print_option (SANE_Device * device, int opt_num, const SANE_Option_Descriptor *o
   else if(opt->cap & SANE_CAP_HARD_SELECT)
     fputs (" [hardware]", stdout);
 
-  else if(!(opt->cap & SANE_CAP_SOFT_SELECT) && (opt->cap & SANE_CAP_SOFT_DETECT))
+  else if(SANE_OPTION_IS_READONLY(opt->cap))
     fputs (" [read-only]", stdout);
 
   else if (opt->cap & SANE_CAP_ADVANCED)
@@ -932,12 +937,19 @@ fetch_options (SANE_Device * device)
       all_options[option_count].flag = 0;
       all_options[option_count].val = 0;
 
-      if (opt->type == SANE_TYPE_BOOL)
-	all_options[option_count].has_arg = optional_argument;
-      else if (opt->type == SANE_TYPE_BUTTON)
-	all_options[option_count].has_arg = no_argument;
+      if (!SANE_OPTION_IS_READONLY (opt->cap))
+      {
+        if (opt->type == SANE_TYPE_BOOL)
+          all_options[option_count].has_arg = optional_argument;
+        else if (opt->type == SANE_TYPE_BUTTON)
+          all_options[option_count].has_arg = no_argument;
+        else
+          all_options[option_count].has_arg = required_argument;
+      }
       else
-	all_options[option_count].has_arg = required_argument;
+      {
+        all_options[option_count].has_arg = no_argument;
+      }
 
       /* Look for scan resolution */
       if ((opt->type == SANE_TYPE_FIXED || opt->type == SANE_TYPE_INT)
@@ -1073,16 +1085,9 @@ process_backend_option (SANE_Handle device, int optnum, const char *optarg)
   size_t vector_length;
   SANE_Status status;
   SANE_Word value;
-  void *valuep;
 
   opt = sane_get_option_descriptor (device, optnum);
 
-  if (!SANE_OPTION_IS_SETTABLE (opt->cap))
-    {
-      fprintf (stderr, "%s: attempted to set readonly option %s\n",
-               prog_name, opt->name);
-      scanimage_exit (1);
-    }
   if (!SANE_OPTION_IS_ACTIVE (opt->cap))
     {
       fprintf (stderr, "%s: attempted to set inactive option %s\n",
@@ -1090,7 +1095,38 @@ process_backend_option (SANE_Handle device, int optnum, const char *optarg)
       scanimage_exit (1);
     }
 
-  if ((opt->cap & SANE_CAP_AUTOMATIC) && optarg &&
+  else if (SANE_OPTION_IS_READONLY (opt->cap))
+    {
+      void *val = malloc (opt->size);
+      if (!val)
+      {
+        fprintf (stderr, "%s: out of memory\n", prog_name);
+        scanimage_exit (1);
+      }
+      sane_control_option (device, optnum, SANE_ACTION_GET_VALUE, val, 0);
+      switch (opt->type)
+      {
+        case SANE_TYPE_BOOL:
+          fputs (*(SANE_Bool *) val ? "yes" : "no", stdout);
+          fputc('\n', stdout);
+          break;
+        case SANE_TYPE_INT:
+          printf ("%d\n", *(SANE_Int *) val);
+          break;
+        case SANE_TYPE_FIXED:
+          printf ("%g\n", SANE_UNFIX (*(SANE_Fixed *) val));
+          break;
+        case SANE_TYPE_STRING:
+          fputs ((char *) val, stdout);
+          fputc ('\n', stdout);
+          break;
+        default:
+         break;
+       }
+      free(val);
+    }
+
+  else if ((opt->cap & SANE_CAP_AUTOMATIC) && optarg &&
       strncasecmp (optarg, "auto", 4) == 0)
     {
       status = sane_control_option (device, optnum, SANE_ACTION_SET_AUTO,
@@ -1102,10 +1138,10 @@ process_backend_option (SANE_Handle device, int optnum, const char *optarg)
 		   prog_name, opt->name, sane_strstatus (status));
 	  scanimage_exit (1);
 	}
-      return;
     }
 
-  valuep = &value;
+  else {
+  void *valuep = &value;
   switch (opt->type)
     {
     case SANE_TYPE_BOOL:
@@ -1166,6 +1202,7 @@ process_backend_option (SANE_Handle device, int optnum, const char *optarg)
   set_option (device, optnum, valuep);
   if (opt->type == SANE_TYPE_STRING && valuep)
     free(valuep);
+  }
 }
 
 static void
