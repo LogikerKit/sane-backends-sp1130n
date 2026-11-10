@@ -270,3 +270,10 @@ usb 0x413c 0x5310
 
 #Dell 1135n (clone of Samsung SCX-4623F)
 usb 0x413c 0x5318
+
+###################
+### HP Models ###
+###################
+
+#HP Laser MFP 131/133/135/136/137/138 Series
+usb 0x03f0 0xf22a

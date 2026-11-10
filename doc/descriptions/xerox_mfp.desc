@@ -449,3 +449,12 @@
 :interface "USB"
 :usbid "0x04e8" "0x3482"
 :status :untested
+
+:mfg "Hewlett-Packard"
+:url "https://www.hp.com/"
+
+:model "Laser MFP 131/133/135/136/137/138 Series"
+:interface "USB"
+:usbid "0x03f0" "0xf22a"
+:status :basic
+:comment "These appear to be rebadged Samsung devices."
