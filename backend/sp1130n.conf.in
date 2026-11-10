@@ -1,0 +1,5 @@
+# SP-1130N USB devices are detected automatically.
+# To list a native LAN scanner in ordinary SANE frontends, add its address:
+# tcp:192.168.1.50:16888
+# Numeric unicast IPv4 only; the port defaults to 16888.
+# Listing configured devices does not probe the network.

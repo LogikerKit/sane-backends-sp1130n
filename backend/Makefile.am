@@ -86,7 +86,7 @@ BACKEND_CONFS= abaton.conf agfafocus.conf apple.conf artec.conf \
 	       st400.conf stv680.conf tamarack.conf \
 	       teco1.conf teco2.conf teco3.conf test.conf \
 	       u12.conf umax1220u.conf umax.conf umax_pp.conf v4l.conf \
-	       xerox_mfp.conf dll.conf saned.conf
+	       xerox_mfp.conf sp1130n.conf dll.conf saned.conf
 # Although ./configure sets up BACKEND_CONFS_ENABLED it does not take
 # into account the fact that some backends don't have a configuration
 # file.  The becfg should depend on BACKEND_CONFS.  The install-becfg
@@ -183,7 +183,7 @@ be_convenience_libs = libabaton.la libagfafocus.la \
     libqcam.la libricoh.la libricoh2.la librts8891.la \
     libs9036.la libsceptre.la libsharp.la \
     libsm3600.la libsm3840.la libsnapscan.la \
-    libsp15c.la libst400.la libstv680.la \
+    libsp1130n.la libsp15c.la libst400.la libstv680.la \
     libtamarack.la libtest.la libteco1.la \
     libteco2.la libteco3.la libu12.la libumax.la \
     libumax1220u.la libumax_pp.la libv4l.la \
@@ -218,7 +218,7 @@ be_dlopen_libs = libsane-abaton.la libsane-agfafocus.la \
     libsane-qcam.la libsane-ricoh.la libsane-ricoh2.la libsane-rts8891.la \
     libsane-s9036.la libsane-sceptre.la libsane-sharp.la \
     libsane-sm3600.la libsane-sm3840.la libsane-snapscan.la \
-    libsane-sp15c.la libsane-st400.la libsane-stv680.la \
+    libsane-sp1130n.la libsane-sp15c.la libsane-st400.la libsane-stv680.la \
     libsane-tamarack.la libsane-test.la libsane-teco1.la \
     libsane-teco2.la libsane-teco3.la libsane-u12.la libsane-umax.la \
     libsane-umax1220u.la libsane-umax_pp.la libsane-v4l.la \
@@ -1607,6 +1607,26 @@ libsane_ricoh2_la_LIBADD = $(COMMON_LIBS) \
     sane_strstatus.lo \
     $(USB_LIBS)
 EXTRA_DIST += ricoh2_buffer.c
+
+libsp1130n_la_SOURCES = sp1130n.c sp1130n.h \
+    sp1130n-protocol.c sp1130n-settings.c sp1130n-jpeg.c \
+    sp1130n-usb.c sp1130n-network.c sp1130n-transport.c \
+    sp1130n-image.c sp1130n-image.h \
+    sp1130n-postprocess.c sp1130n-postprocess.h
+libsp1130n_la_CPPFLAGS = $(AM_CPPFLAGS) -DBACKEND_NAME=sp1130n
+libsp1130n_la_CFLAGS = $(AM_CFLAGS) $(SP1130N_CFLAGS)
+
+nodist_libsane_sp1130n_la_SOURCES = sp1130n-s.c
+libsane_sp1130n_la_CPPFLAGS = $(AM_CPPFLAGS) -DBACKEND_NAME=sp1130n
+libsane_sp1130n_la_CFLAGS = $(AM_CFLAGS) $(SP1130N_CFLAGS)
+libsane_sp1130n_la_LDFLAGS = $(DIST_SANELIBS_LDFLAGS)
+libsane_sp1130n_la_LIBADD = $(COMMON_LIBS) libsp1130n.la \
+    ../sanei/sanei_init_debug.lo \
+    ../sanei/sanei_magic.lo \
+    ../sanei/sanei_usb.lo ../sanei/sanei_config.lo \
+    ../sanei/sanei_constrain_value.lo \
+    $(USB_LIBS) $(XML_LIBS) $(JPEG_LIBS) $(PTHREAD_LIBS) $(MATH_LIB)
+EXTRA_DIST += sp1130n.conf.in sp1130n-license.txt
 
 librts8891_la_SOURCES = rts8891.c rts8891.h rts88xx_lib.c rts88xx_lib.h
 librts8891_la_CPPFLAGS = $(AM_CPPFLAGS) -DBACKEND_NAME=rts8891

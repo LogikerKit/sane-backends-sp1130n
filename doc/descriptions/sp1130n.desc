@@ -1,0 +1,17 @@
+; USB and native LAN support; validation scope is documented per device.
+:backend "sp1130n"
+:version "1.0.3"
+:manpage "sane-sp1130n"
+:devicetype :scanner
+:mfg "Ricoh"
+:model "SP-1130N"
+:status :untested
+:interface "USB Ethernet"
+:usbid "0x05ca" "0x031e"
+:comment "This Ricoh USB ID has not been physically tested; compatibility is unverified. No LAN discovery or encrypted mode."
+:mfg "Fujitsu"
+:model "SP-1130N"
+:status :basic
+:interface "USB Ethernet"
+:usbid "0x04c5" "0x1627"
+:comment "USB/LAN 300-dpi face-down duplex and multipage scans tested. USB600 reliability, calibrated geometry and some fault recovery remain unvalidated. No LAN discovery or encrypted mode."

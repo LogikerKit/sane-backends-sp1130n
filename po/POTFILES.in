@@ -75,6 +75,7 @@ backend/sceptre.c
 backend/sm3840.c
 backend/snapscan-options.c
 backend/snapscan.c
+backend/sp1130n.c
 backend/stv680.c
 backend/stv680.h
 backend/teco1.c
